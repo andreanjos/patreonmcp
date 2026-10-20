@@ -33,6 +33,13 @@ Webhooks persist and can export future patron events, so treat URI changes and
 unpausing as sensitive operations. Private, loopback, link-local, and reserved
 IP targets are rejected.
 
+## Data exposure
+
+PII fields (patron email, creator notes, shipping addresses) are disabled
+unless `PATREON_ALLOW_PII=1`. Webhook signing secrets and Live stream keys are
+redacted by default. Post content is escaped unless `allow_html=true`, and post
+content is capped at 100,000 characters.
+
 ## Undocumented web API
 
 Post write tools use Patreon's internal web API, not the public OAuth API. Those

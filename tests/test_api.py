@@ -733,3 +733,26 @@ async def test_post_content_is_capped() -> None:
 
     assert post.content_truncated is True
     assert len(post.content or "") == 100_000
+
+
+async def test_live_create_and_update_redact_stream_key_by_default() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return json_response(
+            {
+                "data": {
+                    "type": "live",
+                    "id": "1",
+                    "attributes": {"stream_key": "rtmp-secret", "state": "live"},
+                }
+            }
+        )
+
+    api, client = make_api(handler)
+    created = await api.create_live(title="T", state="live")
+    updated = await api.update_live("1", "live_ended")
+    revealed = await api.create_live(title="T", state="live", include_stream_key=True)
+    await client.aclose()
+
+    assert created.stream_key is None
+    assert updated.stream_key is None
+    assert revealed.stream_key == "rtmp-secret"

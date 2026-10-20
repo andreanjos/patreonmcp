@@ -204,9 +204,9 @@ proxy. Anyone who can reach the port can call destructive tools.
 | `create_webhook` | Create a webhook; response includes the signing secret. | `w:campaigns.webhook` |
 | `update_webhook` | Change URI, triggers, or paused state; unpause to redeliver. | `w:campaigns.webhook` |
 | `delete_webhook` | Delete a webhook. | `w:campaigns.webhook` |
-| `create_live` | Schedule or immediately start a Live. | `w:campaigns.lives` |
+| `create_live` | Schedule or immediately start a Live; stream key redacted by default. | `w:campaigns.lives` |
 | `get_live` | Live state and RTMP connection details; stream key redacted by default. | `campaigns.lives` |
-| `update_live` | Start or end a Live. | `w:campaigns.lives` |
+| `update_live` | Start or end a Live; stream key redacted by default. | `w:campaigns.lives` |
 
 ### Pagination
 

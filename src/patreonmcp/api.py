@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -190,26 +191,32 @@ def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
     host = parsed.hostname or ""
     if "*" not in allowed_hosts and host not in allowed_hosts:
         raise PatreonError("Webhook uri host is not in PATREON_WEBHOOK_ALLOWED_HOSTS.")
+    if host.lower() in {"localhost", "localhost."} or host.lower().endswith(".localhost"):
+        raise PatreonError("Webhook uri must not target a local hostname.")
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        if re.fullmatch(r"[0-9.]+", host):
-            raise PatreonError(
-                "Webhook uri must use a canonical hostname, not a numeric IP form."
-            ) from None
-    else:
-        if (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        ):
-            raise PatreonError(
-                "Webhook uri must not target a private, loopback, link-local, "
-                "reserved, multicast, or unspecified address."
-            )
+        try:
+            address = ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            if re.fullmatch(r"[0-9.]+", host):
+                raise PatreonError(
+                    "Webhook uri must use a canonical hostname, not a numeric IP form."
+                ) from None
+    if address is not None and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+        or getattr(address, "ipv4_mapped", None) is not None
+    ):
+        raise PatreonError(
+            "Webhook uri must not target a private, loopback, link-local, "
+            "reserved, multicast, or unspecified address."
+        )
     return uri
 
 
@@ -935,6 +942,10 @@ class PatreonAPI:
         if triggers is not None:
             attributes["triggers"] = _validate_triggers(triggers)
         if paused is not None:
+            if paused is False and not self.webhook_allowed_hosts:
+                raise PatreonError(
+                    "Unpausing webhooks is disabled without PATREON_WEBHOOK_ALLOWED_HOSTS."
+                )
             attributes["paused"] = paused
         if not attributes:
             raise PatreonError(
@@ -969,6 +980,7 @@ class PatreonAPI:
         description: str | None = None,
         scheduled_for: str | None = None,
         live_access_rule_ids: Sequence[int] | None = None,
+        include_stream_key: bool = False,
     ) -> Live:
         if not isinstance(title, str):
             raise PatreonError("title must be a string.")
@@ -1013,7 +1025,10 @@ class PatreonAPI:
         data = payload.get("data")
         if not isinstance(data, dict):
             raise PatreonError("Patreon returned no live data after creation.")
-        return _normalize_live(data)
+        live = _normalize_live(data)
+        if not include_stream_key:
+            live.stream_key = None
+        return live
 
     async def get_live(self, live_id: str, *, include_stream_key: bool = False) -> Live:
         live_id = _validate_id(live_id, "live_id")
@@ -1030,7 +1045,9 @@ class PatreonAPI:
             live.stream_key = None
         return live
 
-    async def update_live(self, live_id: str, state: str) -> Live:
+    async def update_live(
+        self, live_id: str, state: str, *, include_stream_key: bool = False
+    ) -> Live:
         live_id = _validate_id(live_id, "live_id")
         if state not in LIVE_UPDATE_STATES:
             raise PatreonError("state must be 'live' or 'live_ended' when updating a live.")
@@ -1047,4 +1064,7 @@ class PatreonAPI:
         data = payload.get("data")
         if not isinstance(data, dict):
             raise PatreonError("Patreon returned no live data after update.")
-        return _normalize_live(data)
+        live = _normalize_live(data)
+        if not include_stream_key:
+            live.stream_key = None
+        return live

@@ -569,7 +569,7 @@ class PatreonWebAPI:
             included.extend({"type": "access-rule", "id": rule_id} for rule_id in rule_ids)
         elif visibility in {"public", "paid"}:
             relationships["access_rules"] = {"data": []}
-        elif tier_ids:
+        elif tier_ids is not None:
             raise PatreonError("tier_ids may only be used with visibility='tiers'.")
 
         if tags is not None:
@@ -625,7 +625,7 @@ class PatreonWebAPI:
             raise PatreonError("scheduled_for requires publish=true.")
         if visibility == "tiers" and not tier_ids:
             raise PatreonError("tier_ids is required when visibility is 'tiers'.")
-        if visibility != "tiers" and tier_ids:
+        if visibility != "tiers" and tier_ids is not None:
             raise PatreonError("tier_ids may only be used with visibility='tiers'.")
 
         payload = await self._build_post_payload(

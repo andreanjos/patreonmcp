@@ -716,8 +716,20 @@ def create_server(
                 )
             ),
         ] = None,
+        include_stream_key: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include the RTMP stream key. Off by default; fetch it with "
+                    "get_live(include_stream_key=true) when needed."
+                )
+            ),
+        ] = False,
     ) -> Live:
-        """Create an early-access Patreon Live livestream."""
+        """Create an early-access Patreon Live livestream.
+
+        The stream key is redacted by default.
+        """
 
         return await _guard(
             _api(ctx).create_live(
@@ -726,6 +738,7 @@ def create_server(
                 description=description,
                 scheduled_for=scheduled_for,
                 live_access_rule_ids=live_access_rule_ids,
+                include_stream_key=include_stream_key,
             )
         )
 
@@ -762,9 +775,15 @@ def create_server(
                 )
             ),
         ],
+        include_stream_key: Annotated[
+            bool,
+            Field(description="Include the RTMP stream key. Off by default."),
+        ] = False,
     ) -> Live:
-        """Start or end a livestream. Patreon enforces valid state transitions."""
+        """Start or end a livestream. The stream key is redacted by default."""
 
-        return await _guard(_api(ctx).update_live(live_id, state))
+        return await _guard(
+            _api(ctx).update_live(live_id, state, include_stream_key=include_stream_key)
+        )
 
     return mcp
