@@ -47,8 +47,16 @@ def _parser() -> argparse.ArgumentParser:
         "--allow-remote-http",
         action="store_true",
         help=(
-            "Allow binding the unauthenticated HTTP transport beyond loopback. "
-            "Put it behind an authenticated proxy if you use this."
+            "Allow binding the HTTP transport beyond loopback. Requires "
+            "PATREON_HTTP_BEARER_TOKEN unless --allow-unauthenticated-http is also set."
+        ),
+    )
+    serve.add_argument(
+        "--allow-unauthenticated-http",
+        action="store_true",
+        help=(
+            "Permit remote HTTP without a bearer token. Only use behind an "
+            "authenticated reverse proxy."
         ),
     )
     serve.add_argument(
@@ -119,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.port = 8000
         args.log_level = "WARNING"
         args.allow_remote_http = False
+        args.allow_unauthenticated_http = False
 
     try:
         settings = load_settings().require_auth()
@@ -137,20 +146,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not 1 <= args.port <= 65535:
             print("patreonmcp: --port must be between 1 and 65535.", file=sys.stderr)
             return 2
-        if not _is_loopback_host(args.host) and not args.allow_remote_http:
-            print(
-                "patreonmcp: refusing to expose the unauthenticated HTTP transport "
-                "beyond loopback. Pass --allow-remote-http only behind an "
-                "authenticated proxy.",
-                file=sys.stderr,
-            )
-            return 2
         if not _is_loopback_host(args.host):
-            print(
-                "patreonmcp: warning: streamable HTTP has no built-in authentication; "
-                "anyone who can reach the port can call destructive tools.",
-                file=sys.stderr,
-            )
+            if not args.allow_remote_http:
+                print(
+                    "patreonmcp: refusing to expose HTTP beyond loopback. Pass "
+                    "--allow-remote-http and set PATREON_HTTP_BEARER_TOKEN.",
+                    file=sys.stderr,
+                )
+                return 2
+            if not settings.http_bearer_token and not args.allow_unauthenticated_http:
+                print(
+                    "patreonmcp: refusing remote HTTP without authentication. Set "
+                    "PATREON_HTTP_BEARER_TOKEN or pass --allow-unauthenticated-http "
+                    "behind an authenticated proxy.",
+                    file=sys.stderr,
+                )
+                return 2
+            if not settings.http_bearer_token:
+                print(
+                    "patreonmcp: warning: remote HTTP is unauthenticated; anyone who "
+                    "can reach the port can call destructive tools.",
+                    file=sys.stderr,
+                )
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),

@@ -183,10 +183,10 @@ PATREON_ACCESS_TOKEN=... uv run patreonmcp serve --transport streamable-http --h
 
 The MCP endpoint is `/mcp`. Set `PATREON_HTTP_BEARER_TOKEN` to require a bearer
 token on every HTTP request; clients then send
-`Authorization: Bearer <token>`. Without it, the HTTP transport is
-unauthenticated. It binds to loopback by default; binding elsewhere requires
-`--allow-remote-http` and should only be done behind an authenticated reverse
-proxy.
+`Authorization: Bearer <token>`. Without it, loopback HTTP is unauthenticated.
+Binding beyond loopback requires both `--allow-remote-http` and a bearer token;
+`--allow-unauthenticated-http` is a second explicit opt-in for reverse-proxy
+deployments.
 
 ```json
 {

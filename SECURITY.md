@@ -23,9 +23,9 @@ redirected by environment overrides.
 
 The streamable-HTTP transport binds to loopback by default. Set
 `PATREON_HTTP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on every
-request. Without that token the transport is unauthenticated; do not expose it
-beyond loopback unless it is behind an authenticated reverse proxy, and treat
-`--allow-remote-http` as a deliberate risk decision.
+request. Remote binding requires both `--allow-remote-http` and a bearer token.
+`--allow-unauthenticated-http` is an additional explicit opt-in for deployments
+behind an authenticated reverse proxy.
 
 ## Webhook writes
 

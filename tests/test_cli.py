@@ -38,3 +38,27 @@ def test_remote_http_requires_explicit_opt_in(monkeypatch, capsys) -> None:
     assert code == 2
     assert called == []
     assert "refusing to expose" in capsys.readouterr().err
+
+
+def test_remote_http_requires_a_token_or_explicit_unauthenticated_flag(monkeypatch, capsys) -> None:
+    import patreonmcp.cli as cli
+    from patreonmcp.config import Settings
+
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(access_token="x"))
+    called: list[object] = []
+    monkeypatch.setattr(cli, "create_server", lambda settings: called.append(settings))
+
+    code = cli.main(
+        [
+            "serve",
+            "--transport",
+            "streamable-http",
+            "--host",
+            "0.0.0.0",
+            "--allow-remote-http",
+        ]
+    )
+
+    assert code == 2
+    assert called == []
+    assert "without authentication" in capsys.readouterr().err
