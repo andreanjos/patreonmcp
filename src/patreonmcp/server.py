@@ -47,15 +47,15 @@ READ_ONLY = ToolAnnotations(
     idempotent_hint=True,
     open_world_hint=True,
 )
-CREATE = ToolAnnotations(
+MUTATE = ToolAnnotations(
     read_only_hint=False,
-    destructive_hint=False,
+    destructive_hint=True,
     idempotent_hint=False,
     open_world_hint=True,
 )
-UPDATE = ToolAnnotations(
+MUTATE_IDEMPOTENT = ToolAnnotations(
     read_only_hint=False,
-    destructive_hint=False,
+    destructive_hint=True,
     idempotent_hint=True,
     open_world_hint=True,
 )
@@ -392,7 +392,7 @@ def create_server(
 
         return await _guard(_api(ctx).get_post(post_id))
 
-    @mcp.tool(annotations=CREATE)
+    @mcp.tool(annotations=MUTATE)
     async def create_post(
         ctx: Context,
         title: Annotated[str, Field(description="Post title.")],
@@ -483,7 +483,7 @@ def create_server(
             )
         )
 
-    @mcp.tool(annotations=UPDATE)
+    @mcp.tool(annotations=MUTATE_IDEMPOTENT)
     async def update_post(
         ctx: Context,
         post_id: Annotated[str, Field(description="Patreon post ID.")],
@@ -552,7 +552,7 @@ def create_server(
             )
         )
 
-    @mcp.tool(annotations=UPDATE)
+    @mcp.tool(annotations=MUTATE_IDEMPOTENT)
     async def publish_post(
         ctx: Context,
         post_id: Annotated[str, Field(description="Patreon post ID.")],
@@ -685,7 +685,7 @@ def create_server(
 
         return await _guard(_api(ctx).delete_webhook(webhook_id))
 
-    @mcp.tool(annotations=CREATE)
+    @mcp.tool(annotations=MUTATE)
     async def create_live(
         ctx: Context,
         title: Annotated[str, Field(description="Livestream title.")],
@@ -763,7 +763,7 @@ def create_server(
 
         return await _guard(_api(ctx).get_live(live_id, include_stream_key=include_stream_key))
 
-    @mcp.tool(annotations=UPDATE)
+    @mcp.tool(annotations=MUTATE_IDEMPOTENT)
     async def update_live(
         ctx: Context,
         live_id: Annotated[str, Field(description="Live ID.")],
