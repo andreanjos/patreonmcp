@@ -146,6 +146,27 @@ The server reads process environment variables only. `.env.example` documents th
 names; it is not loaded automatically. Use your shell, your MCP client's `env`
 block, or `uv run --env-file .env ...`.
 
+## Setup helper
+
+Generate a client config with absolute paths, then fill in the placeholder
+token:
+
+```bash
+uv run patreonmcp init
+uv run patreonmcp init --output .mcp.json
+uv run patreonmcp init --http --url http://127.0.0.1:8000/mcp
+```
+
+`init` never prints credentials; it uses explicit `REPLACE_...` placeholders.
+Written files are mode `0600`.
+
+Inspect the effective configuration with secrets redacted:
+
+```bash
+uv run patreonmcp config
+uv run patreonmcp config --json
+```
+
 ## MCP client configuration
 
 Use an absolute path to this checkout. Example for Claude Desktop, Claude Code,

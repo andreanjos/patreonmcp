@@ -132,8 +132,9 @@ def _print_posts(page: Any, as_json: bool) -> None:
             )
         )
         return
+    print("ID\tTITLE\tTYPE\tSTATUS")
     if not page.posts:
-        print("No posts found.")
+        print("(none)")
         return
     for post in page.posts:
         _print_post(post, False)
