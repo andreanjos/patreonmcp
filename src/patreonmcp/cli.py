@@ -12,6 +12,7 @@ from . import __version__
 from .api import PatreonAPI
 from .client import PatreonClient, PatreonError
 from .config import ConfigError, Settings, load_settings
+from .http_auth import BearerAuthMiddleware
 from .server import create_server
 from .web_api import PatreonWebAPI, PatreonWebClient
 
@@ -165,7 +166,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.transport == "stdio":
         mcp.run("stdio")
     else:
-        mcp.run("streamable-http", host=args.host, port=args.port)
+        import uvicorn
+
+        app = mcp.streamable_http_app(host=args.host)
+        if settings.http_bearer_token:
+            app = BearerAuthMiddleware(app, settings.http_bearer_token)
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level=args.log_level.lower(),
+        )
     return 0
 
 

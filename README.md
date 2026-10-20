@@ -137,6 +137,7 @@ automatically and never prints the cookie.
 | `PATREON_TOKEN_URL` | No | Token endpoint; defaults to `https://www.patreon.com/api/oauth2/token`. |
 | `PATREON_WEB_BASE_URL` | No | Web API base; defaults to `https://www.patreon.com`. |
 | `PATREON_USER_AGENT` | No | Browser User-Agent for the web session; match the browser that issued the cookie if Cloudflare rejects it. |
+| `PATREON_HTTP_BEARER_TOKEN` | No | Require `Authorization: Bearer <token>` on streamable-HTTP requests. Minimum 16 characters. |
 | `PATREON_WEBHOOK_ALLOWED_HOSTS` | No | Required to enable webhook creation. Comma-separated hostname allowlist; `*` explicitly allows any public host. Private/loopback IP targets are rejected. |
 | `PATREON_ALLOW_PII` | No | Set to `1` to enable patron email, creator notes, and shipping addresses. Disabled by default. |
 | `PATREON_TIMEOUT_SECONDS` | No | HTTP timeout; defaults to `30`. |
@@ -180,10 +181,12 @@ For HTTP transport instead of stdio:
 PATREON_ACCESS_TOKEN=... uv run patreonmcp serve --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-The MCP endpoint is `/mcp`. The HTTP transport has **no built-in
-authentication**. It binds to loopback by default; binding elsewhere requires
+The MCP endpoint is `/mcp`. Set `PATREON_HTTP_BEARER_TOKEN` to require a bearer
+token on every HTTP request; clients then send
+`Authorization: Bearer <token>`. Without it, the HTTP transport is
+unauthenticated. It binds to loopback by default; binding elsewhere requires
 `--allow-remote-http` and should only be done behind an authenticated reverse
-proxy. Anyone who can reach the port can call destructive tools.
+proxy.
 
 ## Tools
 

@@ -252,6 +252,18 @@ async def test_webhook_crud_payloads() -> None:
             )
         if request.method == "DELETE":
             return httpx2.Response(204)
+        if request.method == "GET":
+            return json_response(
+                {
+                    "data": [
+                        {
+                            "type": "webhook",
+                            "id": "wh-1",
+                            "attributes": {"uri": "https://example.com/hook"},
+                        }
+                    ]
+                }
+            )
         return json_response({"data": []})
 
     api, client = make_api(handler)
@@ -268,8 +280,9 @@ async def test_webhook_crud_payloads() -> None:
 
     post_body = calls[0][2]
     assert post_body["data"]["relationships"]["campaign"]["data"]["id"] == "42"
-    assert calls[1][2]["data"]["attributes"] == {"paused": False}
-    assert calls[2][0] == "DELETE"
+    assert calls[1][0] == "GET"
+    assert calls[2][2]["data"]["attributes"] == {"paused": False}
+    assert calls[3][0] == "DELETE"
 
 
 async def test_webhook_validation_rejects_unsafe_input() -> None:

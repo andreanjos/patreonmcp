@@ -221,3 +221,12 @@ def test_malformed_base_url_is_a_config_error() -> None:
                 "PATREON_WEB_BASE_URL": "https://[::1",
             }
         )
+
+
+def test_http_bearer_token_is_validated_and_redacted() -> None:
+    settings = load_settings({"PATREON_ACCESS_TOKEN": "x", "PATREON_HTTP_BEARER_TOKEN": "a" * 16})
+    assert settings.http_bearer_token == "a" * 16
+    assert "a" * 16 not in repr(settings)
+
+    with pytest.raises(ConfigError, match="at least 16"):
+        load_settings({"PATREON_ACCESS_TOKEN": "x", "PATREON_HTTP_BEARER_TOKEN": "short"})

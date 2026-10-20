@@ -34,6 +34,7 @@ class Settings:
     session_cookie: str | None = field(default=None, repr=False)
     session_cookie_file: Path | None = None
     web_user_agent: str | None = None
+    http_bearer_token: str | None = field(default=None, repr=False)
     webhook_allowed_hosts: tuple[str, ...] = ()
     allow_pii: bool = False
     api_base_url: str = DEFAULT_API_BASE_URL
@@ -267,6 +268,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         "PATREON_WEB_BASE_URL",
     )
 
+    http_bearer_token = _clean(env.get("PATREON_HTTP_BEARER_TOKEN"))
+    if http_bearer_token is not None and len(http_bearer_token) < 16:
+        raise ConfigError("PATREON_HTTP_BEARER_TOKEN must be at least 16 characters.")
+
     settings = Settings(
         access_token=env_access or stored_access,
         refresh_token=env_refresh or (stored_refresh if not env_access else None),
@@ -276,6 +281,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         session_cookie=env_cookie or file_cookie,
         session_cookie_file=session_cookie_file,
         web_user_agent=_clean(env.get("PATREON_USER_AGENT")),
+        http_bearer_token=http_bearer_token,
         webhook_allowed_hosts=allowed_hosts,
         allow_pii=(_clean(env.get("PATREON_ALLOW_PII")) or "").lower()
         in {"1", "true", "yes", "on"},

@@ -949,10 +949,18 @@ class PatreonAPI:
         if triggers is not None:
             attributes["triggers"] = _validate_triggers(triggers)
         if paused is not None:
-            if paused is False and not self.webhook_allowed_hosts:
-                raise PatreonError(
-                    "Unpausing webhooks is disabled without PATREON_WEBHOOK_ALLOWED_HOSTS."
+            if paused is False:
+                if not self.webhook_allowed_hosts:
+                    raise PatreonError(
+                        "Unpausing webhooks is disabled without PATREON_WEBHOOK_ALLOWED_HOSTS."
+                    )
+                existing = await self.list_webhooks(include_secrets=False)
+                match = next(
+                    (item for item in existing.webhooks if item.id == webhook_id),
+                    None,
                 )
+                if match is not None and match.uri:
+                    _validate_webhook_uri(match.uri, self.webhook_allowed_hosts)
             attributes["paused"] = paused
         if not attributes:
             raise PatreonError(

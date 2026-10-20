@@ -21,10 +21,11 @@ redirected by environment overrides.
 
 ## HTTP transport
 
-The streamable-HTTP transport has no built-in authentication. It binds to
-loopback by default. Do not expose it beyond loopback unless it is behind an
-authenticated reverse proxy, and treat `--allow-remote-http` as a deliberate
-risk decision.
+The streamable-HTTP transport binds to loopback by default. Set
+`PATREON_HTTP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on every
+request. Without that token the transport is unauthenticated; do not expose it
+beyond loopback unless it is behind an authenticated reverse proxy, and treat
+`--allow-remote-http` as a deliberate risk decision.
 
 ## Webhook writes
 
