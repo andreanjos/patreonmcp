@@ -26,6 +26,7 @@ from .api import (
     _normalize_scheduled_for,
     _resource_list,
     _total,
+    _validate_cursor,
     _validate_id,
     _validate_page_size,
 )
@@ -787,6 +788,7 @@ class PatreonWebAPI:
                 "page[count]": str(page_size),
             }
         )
+        cursor = _validate_cursor(cursor)
         if cursor:
             params["page[cursor]"] = cursor
         response = await self.client.request("GET", "/api/posts", params=params)

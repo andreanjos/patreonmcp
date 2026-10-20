@@ -167,6 +167,16 @@ def _validate_id(value: str, label: str) -> str:
     return value
 
 
+def _validate_cursor(cursor: str | None) -> str | None:
+    if cursor is None:
+        return None
+    if not isinstance(cursor, str) or len(cursor) > 4096:
+        raise PatreonError("cursor must be a string of at most 4096 characters.")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in cursor):
+        raise PatreonError("cursor must not contain control characters.")
+    return cursor
+
+
 def _validate_page_size(page_size: int) -> int:
     if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000:
         raise PatreonError("page_size must be an integer between 1 and 1000.")
@@ -180,18 +190,22 @@ def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
         raise PatreonError(f"Webhook uri must be at most {MAX_WEBHOOK_URI_CHARS} characters.")
     try:
         parsed = urlparse(uri)
+        scheme = parsed.scheme
+        netloc = parsed.netloc
+        username = parsed.username
+        password = parsed.password
+        host = parsed.hostname or ""
     except ValueError as exc:
         raise PatreonError("Webhook uri is not a valid URL.") from exc
-    if parsed.scheme != "https" or not parsed.netloc:
+    if scheme != "https" or not netloc:
         raise PatreonError("Webhook uri must be an absolute https:// URL.")
-    if parsed.username or parsed.password:
+    if username or password:
         raise PatreonError("Webhook uri must not contain embedded credentials.")
     if not allowed_hosts:
         raise PatreonError(
             "Webhook writes are disabled. Set PATREON_WEBHOOK_ALLOWED_HOSTS to "
             "the hostnames that may receive Patreon events."
         )
-    host = parsed.hostname or ""
     if "*" not in allowed_hosts and host not in allowed_hosts:
         raise PatreonError("Webhook uri host is not in PATREON_WEBHOOK_ALLOWED_HOSTS.")
     if host.lower() in {"localhost", "localhost."} or host.lower().endswith(".localhost"):
@@ -202,7 +216,7 @@ def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
     except ValueError:
         try:
             address = ipaddress.ip_address(socket.inet_aton(host))
-        except (OSError, ValueError):
+        except (OSError, ValueError, OverflowError):
             if re.fullmatch(r"[0-9.]+", host):
                 raise PatreonError(
                     "Webhook uri must use a canonical hostname, not a numeric IP form."
@@ -789,6 +803,7 @@ class PatreonAPI:
             params["fields[address]"] = _csv(ADDRESS_FIELDS)
         if includes:
             params["include"] = ",".join(includes)
+        cursor = _validate_cursor(cursor)
         if cursor:
             params["page[cursor]"] = cursor
 
@@ -873,6 +888,7 @@ class PatreonAPI:
             "fields[post]": _csv(post_fields),
             "page[count]": str(page_size),
         }
+        cursor = _validate_cursor(cursor)
         if cursor:
             params["page[cursor]"] = cursor
 
