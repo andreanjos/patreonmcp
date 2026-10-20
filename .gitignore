@@ -21,6 +21,8 @@ tokens.json
 .envrc
 *.pem
 *.key
+.mcp.json
+mcp.json
 
 # Tool caches
 .pytest_cache/
