@@ -295,8 +295,9 @@ flow, newly requested scopes are added to previously approved scopes.
   unless explicitly requested.
 - Post content and teaser text are escaped unless `allow_html=true`; post
   content is capped at 100,000 characters.
-- HTTP transport binds to loopback and refuses remote exposure without
-  `--allow-remote-http`.
+- HTTP transport binds to loopback; remote exposure requires
+  `--allow-remote-http` plus `PATREON_HTTP_BEARER_TOKEN` (or a second explicit
+  `--allow-unauthenticated-http` opt-in for a reverse proxy).
 - Token and cookie files must be regular files owned by the current user with
   no group/other permissions (`chmod 600`).
 - Base URLs are pinned to `www.patreon.com` (or loopback for tests), so a

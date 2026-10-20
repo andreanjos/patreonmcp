@@ -29,3 +29,4 @@ cookies.txt
 
 # macOS
 .DS_Store
+.coverage

@@ -197,8 +197,8 @@ def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
         host = parsed.hostname or ""
     except ValueError as exc:
         raise PatreonError("Webhook uri is not a valid URL.") from exc
-    if scheme != "https" or not netloc:
-        raise PatreonError("Webhook uri must be an absolute https:// URL.")
+    if scheme != "https" or not netloc or not host:
+        raise PatreonError("Webhook uri must be an absolute https:// URL with a host.")
     if username or password:
         raise PatreonError("Webhook uri must not contain embedded credentials.")
     if not allowed_hosts:
