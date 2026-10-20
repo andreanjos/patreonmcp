@@ -13,6 +13,7 @@ from .api import PatreonAPI
 from .client import PatreonClient, PatreonError
 from .config import ConfigError, Settings, load_settings
 from .http_auth import BearerAuthMiddleware
+from .post_cli import add_post_parser, run_post_command
 from .server import create_server
 from .web_api import PatreonWebAPI, PatreonWebClient
 
@@ -66,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Log level written to stderr.",
     )
 
+    add_post_parser(subparsers)
     subparsers.add_parser(
         "check",
         help="Verify OAuth credentials and/or the web post session.",
@@ -138,6 +140,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "check":
         try:
             return asyncio.run(_check(settings))
+        except PatreonError as exc:
+            print(f"patreonmcp: {exc}", file=sys.stderr)
+            return 1
+
+    if command == "post":
+        try:
+            return asyncio.run(run_post_command(settings, args))
         except PatreonError as exc:
             print(f"patreonmcp: {exc}", file=sys.stderr)
             return 1

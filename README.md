@@ -199,6 +199,30 @@ deployments.
 }
 ```
 
+## CLI post commands
+
+The same post operations are available from the terminal, which is useful for
+checking a session before wiring up an MCP client:
+
+```bash
+# Published posts need an OAuth token; drafts need a web session.
+uv run patreonmcp post list
+uv run patreonmcp post list --drafts --campaign-id 42
+
+uv run patreonmcp post create "Launch notes" --content "Hello patrons" --publish
+uv run patreonmcp post create "Draft" --content-file post.html --allow-html
+uv run patreonmcp post get POST_ID --content
+uv run patreonmcp post update POST_ID --title "New title" --publish
+uv run patreonmcp post update POST_ID --clear-tags
+uv run patreonmcp post publish POST_ID
+uv run patreonmcp post delete POST_ID --yes
+
+uv run patreonmcp post list --json
+```
+
+`post create` defaults to a draft. `--schedule` accepts an ISO 8601 time and
+implies `--publish`. Deletion requires `--yes`.
+
 ## Tools
 
 | Tool | What it does | Scope |

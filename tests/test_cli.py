@@ -62,3 +62,23 @@ def test_remote_http_requires_a_token_or_explicit_unauthenticated_flag(monkeypat
     assert code == 2
     assert called == []
     assert "without authentication" in capsys.readouterr().err
+
+
+def test_post_commands_are_registered() -> None:
+    from patreonmcp.cli import _parser
+
+    args = _parser().parse_args(["post", "create", "Title", "--content", "Body"])
+    assert args.command == "post"
+    assert args.post_command == "create"
+    assert args.title == "Title"
+    assert args.content == "Body"
+
+
+async def test_post_delete_requires_yes() -> None:
+    from patreonmcp.cli import _parser
+    from patreonmcp.config import Settings
+    from patreonmcp.post_cli import run_post_command
+
+    args = _parser().parse_args(["post", "delete", "p1"])
+    code = await run_post_command(Settings(access_token="x"), args)
+    assert code == 2
