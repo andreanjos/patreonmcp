@@ -10,20 +10,17 @@ plus post creation and editing through Patreon's web editor API.
 
 Python 3.10+.
 
-## Why this server
+## Features
 
-A search of existing Patreon MCP servers in October 2026 found two closer alternatives:
-
-- [`KyuRish/patreon-mcp-server`](https://github.com/KyuRish/patreon-mcp-server)
-  (MIT): clean and read-only, with six tools.
-- [`proton4444/patreon-mcp`](https://github.com/proton4444/patreon-mcp):
-  Playwright-based automation with no license.
-
-This server covers the core read surface plus writable webhooks and Lives,
-returns typed structured output, handles cursor pagination, refreshes OAuth
-tokens, and ships with tests. It also adds **post creation, editing, publishing,
-and deletion** through Patreon's own web editor API when a logged-in browser
-session cookie is provided. It does **not** drive a browser.
+- Typed MCP tools with structured JSON output.
+- Identity, campaigns, tiers, members, and posts through the official API.
+- Cursor pagination, explicit field selection, and opt-in PII fields.
+- Automatic OAuth refresh with rotated-token persistence.
+- Webhook CRUD and early-access Lives.
+- Text post creation, editing, publishing, scheduling, and deletion through
+  Patreon's web editor API when a browser session cookie is configured.
+- No browser automation. The post client talks directly to Patreon's JSON:API
+  routes.
 
 ## API limits worth knowing
 
