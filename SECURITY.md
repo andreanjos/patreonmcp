@@ -11,11 +11,12 @@ This project handles two sensitive credentials:
 
 - `PATREON_ACCESS_TOKEN` / OAuth refresh tokens
 - `PATREON_SESSION_COOKIE`, a full logged-in Patreon browser session
+- `PATREON_HTTP_BEARER_TOKEN`, the optional HTTP transport credential
 
 Never commit either value, include it in an issue, or paste it into a chat.
-Prefer `PATREON_TOKEN_FILE` and `PATREON_SESSION_COOKIE_FILE` with mode `0600`;
-the server rejects symlinks, non-regular files, wrong ownership, and
-group/world-readable files. API, token, and web base URLs are pinned to
+Prefer `PATREON_TOKEN_FILE` and `PATREON_SESSION_COOKIE_FILE` with mode `0600`.
+The server rejects symlinks and non-regular files; on POSIX it also rejects
+wrong ownership and group/world-readable files. API, token, and web base URLs are pinned to
 `www.patreon.com` (or loopback for local tests) so credentials cannot be
 redirected by environment overrides.
 

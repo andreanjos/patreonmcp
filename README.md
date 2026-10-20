@@ -88,8 +88,8 @@ export PATREON_REFRESH_TOKEN=...
 
 Set `PATREON_TOKEN_FILE` to persist rotated tokens across restarts. The file is
 created with mode `0600`; without it, refreshed tokens live only in memory.
-Existing token and cookie files must already be `0600`, regular files, owned by
-the current user, and not symlinks.
+On POSIX, existing token and cookie files must already be `0600`, regular files,
+owned by the current user, and not symlinks.
 
 ```bash
 export PATREON_TOKEN_FILE="$HOME/.config/patreonmcp/tokens.json"

@@ -143,14 +143,15 @@ def _read_secret_text(
         opened = os.fstat(fd)
         if stat.S_ISLNK(opened.st_mode) or not stat.S_ISREG(opened.st_mode):
             raise ConfigError(f"{label} at {path} must be a regular file.")
-        geteuid = getattr(os, "geteuid", None)
-        if geteuid is not None and opened.st_uid != geteuid():
-            raise ConfigError(f"{label} at {path} must be owned by the current user.")
-        if stat.S_IMODE(opened.st_mode) & 0o077:
-            raise ConfigError(
-                f"{label} at {path} must not be readable or writable by "
-                "group/others; run chmod 600."
-            )
+        if os.name == "posix":
+            geteuid = getattr(os, "geteuid", None)
+            if geteuid is not None and opened.st_uid != geteuid():
+                raise ConfigError(f"{label} at {path} must be owned by the current user.")
+            if stat.S_IMODE(opened.st_mode) & 0o077:
+                raise ConfigError(
+                    f"{label} at {path} must not be readable or writable by "
+                    "group/others; run chmod 600."
+                )
         with os.fdopen(fd, "rb") as handle:
             fd = -1
             data = handle.read(max_bytes + 1)
