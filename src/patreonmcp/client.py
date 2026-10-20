@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx2
 
 from . import __version__
-from .config import Settings
+from .config import ConfigError, Settings, _read_token_file
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,8 @@ USER_AGENT = f"patreonmcp/{__version__}"
 _REFRESH_MARGIN_SECONDS = 60.0
 _MAX_TRANSIENT_RETRIES = 1
 _MAX_RETRY_WAIT_SECONDS = 5.0
+MAX_RESPONSE_BYTES = 8_388_608
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"})
 
 
 class PatreonError(Exception):
@@ -186,7 +190,10 @@ class PatreonClient:
                 self._raise_for_response(response)
 
             if response.status_code in (502, 503, 504):
-                if transient_retries < _MAX_TRANSIENT_RETRIES:
+                if (
+                    transient_retries < _MAX_TRANSIENT_RETRIES
+                    and method.upper() in _RETRYABLE_METHODS
+                ):
                     transient_retries += 1
                     await self._sleep(0.5 * transient_retries)
                     continue
@@ -194,6 +201,17 @@ class PatreonClient:
 
             if response.status_code >= 400:
                 self._raise_for_response(response)
+
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_RESPONSE_BYTES:
+                        raise PatreonError(
+                            "Patreon response exceeded the 8 MiB response limit.",
+                            status_code=response.status_code,
+                        )
+                except ValueError:
+                    pass
 
             if response.status_code == 204 or not response.content:
                 return {}
@@ -237,65 +255,151 @@ class PatreonClient:
         ):
             await self._refresh(failed_generation=self._token_generation)
 
+    @contextlib.asynccontextmanager
+    async def _token_file_lock(self) -> AsyncIterator[None]:
+        path = self.settings.token_file
+        if path is None:
+            yield
+            return
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - Windows
+            yield
+            return
+
+        lock_path = path.with_name(path.name + ".lock")
+        fd = -1
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = await asyncio.to_thread(os.open, lock_path, flags, 0o600)
+            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            logger.warning("Could not lock Patreon token file %s: %s", path, exc)
+            if fd >= 0:
+                os.close(fd)
+            yield
+            return
+
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _adopt_token_file(self) -> bool:
+        path = self.settings.token_file
+        if path is None:
+            return False
+        try:
+            stored = _read_token_file(path)
+        except ConfigError as exc:
+            logger.warning("Could not re-read Patreon token file %s: %s", path, exc)
+            return False
+        if not stored:
+            return False
+
+        stored_access = str(stored.get("access_token") or "").strip() or None
+        stored_refresh = str(stored.get("refresh_token") or "").strip() or None
+        stored_expires = stored.get("expires_at")
+        try:
+            expires_at = float(stored_expires) if stored_expires is not None else None
+        except (TypeError, ValueError):
+            expires_at = None
+
+        if (
+            stored_access == self.settings.access_token
+            and expires_at is not None
+            and expires_at > self._clock() + _REFRESH_MARGIN_SECONDS
+        ):
+            self.settings = replace(self.settings, expires_at=expires_at)
+            self._token_generation += 1
+            return True
+        if (
+            stored_access
+            and stored_access != self.settings.access_token
+            and (expires_at is None or expires_at > self._clock() + _REFRESH_MARGIN_SECONDS)
+        ):
+            self.settings = replace(
+                self.settings,
+                access_token=stored_access,
+                refresh_token=stored_refresh or self.settings.refresh_token,
+                expires_at=expires_at,
+            )
+            self._token_generation += 1
+            return True
+        if stored_refresh and stored_refresh != self.settings.refresh_token:
+            self.settings = replace(self.settings, refresh_token=stored_refresh)
+        return False
+
     async def _refresh(self, *, failed_generation: int) -> None:
         async with self._refresh_lock:
             if self._token_generation != failed_generation:
                 return
-            if not self.settings.can_refresh:
-                raise PatreonAuthError(
-                    "The access token expired, but OAuth refresh credentials are "
-                    "incomplete. Set PATREON_REFRESH_TOKEN, PATREON_CLIENT_ID, and "
-                    "PATREON_CLIENT_SECRET.",
-                    status_code=401,
-                    code="token_refresh_unavailable",
-                )
+            async with self._token_file_lock():
+                if self._adopt_token_file():
+                    return
+                await self._refresh_locked()
 
-            data = {
-                "grant_type": "refresh_token",
-                "refresh_token": self.settings.refresh_token,
-                "client_id": self.settings.client_id,
-                "client_secret": self.settings.client_secret,
-            }
-            try:
-                response = await self._http.post(
-                    self.settings.token_url,
-                    data=data,
-                    headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-                )
-            except httpx2.HTTPError as exc:
-                raise PatreonAuthError(
-                    f"Could not reach the Patreon token endpoint ({type(exc).__name__}): {exc}"
-                ) from exc
-
-            payload = self._maybe_json(response)
-            if response.status_code >= 400:
-                detail, code, _ = _error_details(payload)
-                raise PatreonAuthError(
-                    detail or "Patreon rejected the OAuth refresh request.",
-                    status_code=response.status_code,
-                    code=code or "token_refresh_failed",
-                )
-
-            if not isinstance(payload, dict) or not payload.get("access_token"):
-                raise PatreonAuthError(
-                    "Patreon's token endpoint returned no access token.",
-                    status_code=response.status_code,
-                    code="token_refresh_failed",
-                )
-
-            expires_in = payload.get("expires_in")
-            try:
-                expires_at = self._clock() + float(expires_in)
-            except (TypeError, ValueError):
-                expires_at = None
-
-            self.settings = self.settings.with_tokens(
-                access_token=str(payload["access_token"]),
-                refresh_token=str(payload.get("refresh_token") or ""),
-                expires_at=expires_at,
+    async def _refresh_locked(self) -> None:
+        if not self.settings.can_refresh:
+            raise PatreonAuthError(
+                "The access token expired, but OAuth refresh credentials are "
+                "incomplete. Set PATREON_REFRESH_TOKEN, PATREON_CLIENT_ID, and "
+                "PATREON_CLIENT_SECRET.",
+                status_code=401,
+                code="token_refresh_unavailable",
             )
-            self._token_generation += 1
-            self._save_tokens(payload, expires_at)
+
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.settings.refresh_token,
+            "client_id": self.settings.client_id,
+            "client_secret": self.settings.client_secret,
+        }
+        try:
+            response = await self._http.post(
+                self.settings.token_url,
+                data=data,
+                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+            )
+        except httpx2.HTTPError as exc:
+            raise PatreonAuthError(
+                f"Could not reach the Patreon token endpoint ({type(exc).__name__}): {exc}"
+            ) from exc
+
+        payload = self._maybe_json(response)
+        if response.status_code >= 400:
+            detail, code, _ = _error_details(payload)
+            raise PatreonAuthError(
+                detail or "Patreon rejected the OAuth refresh request.",
+                status_code=response.status_code,
+                code=code or "token_refresh_failed",
+            )
+
+        if not isinstance(payload, dict) or not payload.get("access_token"):
+            raise PatreonAuthError(
+                "Patreon's token endpoint returned no access token.",
+                status_code=response.status_code,
+                code="token_refresh_failed",
+            )
+
+        expires_in = payload.get("expires_in")
+        try:
+            expires_at = self._clock() + float(expires_in)
+        except (TypeError, ValueError):
+            expires_at = None
+
+        self.settings = self.settings.with_tokens(
+            access_token=str(payload["access_token"]),
+            refresh_token=str(payload.get("refresh_token") or ""),
+            expires_at=expires_at,
+        )
+        self._token_generation += 1
+        self._save_tokens(payload, expires_at)
 
     def _save_tokens(self, payload: Mapping[str, Any], expires_at: float | None) -> None:
         path = self.settings.token_file
@@ -308,14 +412,21 @@ class PatreonClient:
             "token_type": payload.get("token_type", "Bearer"),
             "scope": payload.get("scope"),
         }
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(temp_path, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(document, handle, indent=2)
                 handle.write("\n")
+            os.replace(temp_path, path)
             path.chmod(0o600)
         except OSError as exc:
+            with contextlib.suppress(OSError):
+                temp_path.unlink(missing_ok=True)
             logger.warning("Could not persist refreshed Patreon tokens to %s: %s", path, exc)
 
     @staticmethod

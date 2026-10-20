@@ -16,7 +16,7 @@ Python 3.10+.
 - Identity, campaigns, tiers, members, and posts through the official API.
 - Cursor pagination, explicit field selection, and opt-in PII fields.
 - Automatic OAuth refresh with rotated-token persistence.
-- Webhook CRUD and early-access Lives.
+- Webhook CRUD (creation requires a host allowlist) and early-access Lives.
 - Text post creation, editing, publishing, scheduling, and deletion through
   Patreon's web editor API when a browser session cookie is configured.
 - No browser automation. The post client talks directly to Patreon's JSON:API
@@ -38,6 +38,7 @@ without notice, and currently support text posts only. Post write tools require
 
 Member email, creator notes, and shipping addresses are opt-in tool parameters
 because they are sensitive; email and address also require extra OAuth scopes.
+They are also disabled unless the operator sets `PATREON_ALLOW_PII=1`.
 
 ## Install
 
@@ -134,6 +135,8 @@ automatically and never prints the cookie.
 | `PATREON_TOKEN_URL` | No | Token endpoint; defaults to `https://www.patreon.com/api/oauth2/token`. |
 | `PATREON_WEB_BASE_URL` | No | Web API base; defaults to `https://www.patreon.com`. |
 | `PATREON_USER_AGENT` | No | Browser User-Agent for the web session; match the browser that issued the cookie if Cloudflare rejects it. |
+| `PATREON_WEBHOOK_ALLOWED_HOSTS` | No | Required to enable webhook creation. Comma-separated hostname allowlist; `*` explicitly allows any public host. Private/loopback IP targets are rejected. |
+| `PATREON_ALLOW_PII` | No | Set to `1` to enable patron email, creator notes, and shipping addresses. Disabled by default. |
 | `PATREON_TIMEOUT_SECONDS` | No | HTTP timeout; defaults to `30`. |
 
 The server reads process environment variables only. `.env.example` documents the
@@ -175,7 +178,10 @@ For HTTP transport instead of stdio:
 PATREON_ACCESS_TOKEN=... uv run patreonmcp serve --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-The MCP endpoint is `/mcp`.
+The MCP endpoint is `/mcp`. The HTTP transport has **no built-in
+authentication**. It binds to loopback by default; binding elsewhere requires
+`--allow-remote-http` and should only be done behind an authenticated reverse
+proxy. Anyone who can reach the port can call destructive tools.
 
 ## Tools
 
@@ -186,26 +192,27 @@ The MCP endpoint is `/mcp`.
 | `get_campaign` | One campaign with tiers and creator. | `campaigns` |
 | `list_members` | Paginated patrons; optional tiers, profile, email, note, address. | `campaigns.members` |
 | `get_member` | One patron by member UUID. | `campaigns.members` |
-| `list_posts` | Paginated posts; full content is opt-in. | `campaigns.posts` |
-| `get_post` | One post with full HTML content. | `campaigns.posts` |
+| `list_posts` | Paginated posts; content is opt-in and capped at 100,000 characters per post. | `campaigns.posts` |
+| `get_post` | One post; HTML content is capped at 100,000 characters. | `campaigns.posts` |
 | `create_post` | Create a text post, draft or published; public, paid, or tier-gated. | Web session |
 | `update_post` | Edit content/audience, publish, or schedule a post. | Web session |
 | `publish_post` | Publish an existing draft. | Web session |
 | `delete_post` | Delete a post permanently. | Web session |
 | `get_managed_post` | Read a draft, scheduled, or published post. | Web session |
 | `list_drafts` | Paginated unpublished drafts. | Web session |
-| `list_webhooks` | Webhooks created by this API client. | `w:campaigns.webhook` |
+| `list_webhooks` | Webhooks created by this API client; signing secrets redacted by default. | `w:campaigns.webhook` |
 | `create_webhook` | Create a webhook; response includes the signing secret. | `w:campaigns.webhook` |
 | `update_webhook` | Change URI, triggers, or paused state; unpause to redeliver. | `w:campaigns.webhook` |
 | `delete_webhook` | Delete a webhook. | `w:campaigns.webhook` |
 | `create_live` | Schedule or immediately start a Live. | `w:campaigns.lives` |
-| `get_live` | Live state and RTMP connection details. | `campaigns.lives` |
+| `get_live` | Live state and RTMP connection details; stream key redacted by default. | `campaigns.lives` |
 | `update_live` | Start or end a Live. | `w:campaigns.lives` |
 
 ### Pagination
 
 `list_members` and `list_posts` return `next_cursor`. Pass it back as `cursor` to
-fetch the next page. `page_size` accepts 1–1000.
+fetch the next page. `page_size` accepts 1–1000; when post content is included,
+the maximum is 100.
 
 ### Campaign resolution
 
@@ -219,6 +226,10 @@ visible, the tool fails with the visible IDs so the caller can choose.
 publish immediately, or `publish=true` plus `scheduled_for` to schedule. Use
 `visibility="tiers"` with `tier_ids` for tier-gated posts; `public` and `paid`
 need no tier IDs. Only `text_only` posts are supported.
+
+Post content and teaser text are escaped as plain text by default. Set
+`allow_html=true` to publish raw HTML; that is not sanitized and can include
+links, embeds, or tracking pixels.
 
 `update_post` sends a partial update. `publish=true` publishes; omitting
 `publish` saves without changing publication state. `delete_post` is permanent.
@@ -235,6 +246,10 @@ Patreon's public API contract and can break when Patreon changes its web app.
 
 Patreon signs webhook deliveries with `X-Patreon-Signature`, an HMAC-MD5 hex
 digest of the request body using the webhook secret. Verify it on your receiver.
+
+Webhook creation is disabled unless `PATREON_WEBHOOK_ALLOWED_HOSTS` names the
+target host. Webhooks are a persistent data-export channel; approve URI changes
+and unpausing carefully.
 
 ## Scopes
 
@@ -254,6 +269,23 @@ digest of the request body using the webhook secret. Verify it on your receiver.
 
 Third-party OAuth clients must request these explicitly. During Patreon's OAuth
 flow, newly requested scopes are added to previously approved scopes.
+
+## Security defaults
+
+- Patron email, creator notes, and shipping addresses require
+  `PATREON_ALLOW_PII=1`.
+- Webhook creation is disabled until `PATREON_WEBHOOK_ALLOWED_HOSTS` is set.
+- `list_webhooks` redacts signing secrets and `get_live` redacts stream keys
+  unless explicitly requested.
+- Post content and teaser text are escaped unless `allow_html=true`; post
+  content is capped at 100,000 characters.
+- HTTP transport binds to loopback and refuses remote exposure without
+  `--allow-remote-http`.
+- Token and cookie files must be regular files owned by the current user with
+  no group/other permissions (`chmod 600`).
+- Base URLs are pinned to `www.patreon.com` (or loopback for tests), so a
+  rogue environment cannot redirect bearer tokens, refresh tokens, or session
+  cookies to another host.
 
 ## Development
 
@@ -283,6 +315,7 @@ Tests use `httpx2.MockTransport`; no network or real credentials are required.
 
 Patron names, pledge amounts, charge status, and any optional email, note, or
 address fields are sent to your MCP client and therefore to your model provider.
+PII fields are disabled unless `PATREON_ALLOW_PII=1` is set.
 Enable optional fields only when the task needs them, and handle the data in
 accordance with Patreon's Creator Privacy Promise and applicable law.
 

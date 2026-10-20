@@ -28,6 +28,10 @@ dependencies = [
 [project.scripts]
 patreonmcp = "patreonmcp.cli:main"
 
+[project.urls]
+Repository = "https://github.com/andreanjos/patreonmcp"
+Issues = "https://github.com/andreanjos/patreonmcp/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

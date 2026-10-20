@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -145,6 +146,12 @@ LIVE_CREATE_STATES = frozenset({"pre_live", "live"})
 LIVE_UPDATE_STATES = frozenset({"live", "live_ended"})
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+MAX_POST_CONTENT_CHARS = 100_000
+MAX_WEBHOOK_URI_CHARS = 2048
+MAX_WEBHOOK_TRIGGERS = 50
+MAX_LIVE_TITLE_CHARS = 500
+MAX_LIVE_DESCRIPTION_CHARS = 5_000
+MAX_LIVE_ACCESS_RULES = 100
 
 
 def _csv(values: Sequence[str]) -> str:
@@ -165,18 +172,56 @@ def _validate_page_size(page_size: int) -> int:
     return page_size
 
 
-def _validate_webhook_uri(uri: str) -> str:
+def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
+    if not isinstance(uri, str):
+        raise PatreonError("Webhook uri must be a string.")
+    if len(uri) > MAX_WEBHOOK_URI_CHARS:
+        raise PatreonError(f"Webhook uri must be at most {MAX_WEBHOOK_URI_CHARS} characters.")
     parsed = urlparse(uri)
     if parsed.scheme != "https" or not parsed.netloc:
         raise PatreonError("Webhook uri must be an absolute https:// URL.")
     if parsed.username or parsed.password:
         raise PatreonError("Webhook uri must not contain embedded credentials.")
+    if not allowed_hosts:
+        raise PatreonError(
+            "Webhook writes are disabled. Set PATREON_WEBHOOK_ALLOWED_HOSTS to "
+            "the hostnames that may receive Patreon events."
+        )
+    host = parsed.hostname or ""
+    if "*" not in allowed_hosts and host not in allowed_hosts:
+        raise PatreonError("Webhook uri host is not in PATREON_WEBHOOK_ALLOWED_HOSTS.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", host):
+            raise PatreonError(
+                "Webhook uri must use a canonical hostname, not a numeric IP form."
+            ) from None
+    else:
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            raise PatreonError(
+                "Webhook uri must not target a private, loopback, link-local, "
+                "reserved, multicast, or unspecified address."
+            )
     return uri
 
 
 def _validate_triggers(triggers: Sequence[str]) -> list[str]:
+    if isinstance(triggers, str):
+        raise PatreonError("triggers must be a list of strings.")
     if not triggers:
         raise PatreonError("At least one webhook trigger is required.")
+    if len(triggers) > MAX_WEBHOOK_TRIGGERS:
+        raise PatreonError(f"At most {MAX_WEBHOOK_TRIGGERS} webhook triggers are allowed.")
+    if any(not isinstance(item, str) for item in triggers):
+        raise PatreonError("Each webhook trigger must be a string.")
     unknown = sorted(set(triggers) - WEBHOOK_TRIGGERS)
     if unknown:
         allowed = ", ".join(sorted(WEBHOOK_TRIGGERS))
@@ -468,10 +513,15 @@ def _normalize_post(
                 if rule_type:
                     access_rule_types.append(str(rule_type))
     embed_data = attrs.get("embed_data")
+    content = attrs.get("content")
+    content_truncated = False
+    if isinstance(content, str) and len(content) > MAX_POST_CONTENT_CHARS:
+        content = content[:MAX_POST_CONTENT_CHARS]
+        content_truncated = True
     return Post(
         id=str(resource.get("id", "")),
         title=attrs.get("title"),
-        content=attrs.get("content"),
+        content=content,
         post_type=attrs.get("post_type"),
         is_public=attrs.get("is_public"),
         is_paid=attrs.get("is_paid"),
@@ -486,6 +536,7 @@ def _normalize_post(
         embed_data=embed_data if isinstance(embed_data, dict) else None,
         app_status=attrs.get("app_status"),
         current_user_can_edit=attrs.get("current_user_can_edit"),
+        content_truncated=content_truncated,
         tier_ids=tier_ids,
         access_rule_types=access_rule_types,
     )
@@ -527,8 +578,29 @@ def _normalize_live(resource: Mapping[str, Any]) -> Live:
 class PatreonAPI:
     """High-level operations used by the MCP tools."""
 
-    def __init__(self, client: PatreonClient) -> None:
+    def __init__(
+        self,
+        client: PatreonClient,
+        *,
+        webhook_allowed_hosts: Sequence[str] = (),
+        allow_pii: bool = False,
+    ) -> None:
         self.client = client
+        self.webhook_allowed_hosts = tuple(webhook_allowed_hosts)
+        self.allow_pii = allow_pii
+
+    def _require_pii_allowed(
+        self,
+        *,
+        include_email: bool,
+        include_note: bool,
+        include_address: bool,
+    ) -> None:
+        if (include_email or include_note or include_address) and not self.allow_pii:
+            raise PatreonError(
+                "Patron email, notes, and addresses are disabled by default. Set "
+                "PATREON_ALLOW_PII=1 to enable these fields."
+            )
 
     async def _resolve_campaign_id(self, campaign_id: str | None) -> str:
         if campaign_id:
@@ -550,7 +622,10 @@ class PatreonAPI:
             raise PatreonError(
                 f"Multiple campaigns are visible ({ids}). Pass campaign_id explicitly."
             )
-        return _validate_id(str(campaigns[0].get("id")), "campaign_id")
+        campaign_id = campaigns[0].get("id")
+        if campaign_id is None:
+            raise PatreonError("Patreon returned a campaign without an id.")
+        return _validate_id(str(campaign_id), "campaign_id")
 
     async def get_identity(
         self,
@@ -671,6 +746,11 @@ class PatreonAPI:
         include_address: bool = False,
     ) -> MemberPage:
         _validate_page_size(page_size)
+        self._require_pii_allowed(
+            include_email=include_email,
+            include_note=include_note,
+            include_address=include_address,
+        )
         resolved_id = await self._resolve_campaign_id(campaign_id)
 
         member_fields = list(MEMBER_FIELDS)
@@ -726,6 +806,11 @@ class PatreonAPI:
         include_address: bool = False,
     ) -> Member:
         member_id = _validate_id(member_id, "member_id")
+        self._require_pii_allowed(
+            include_email=include_email,
+            include_note=include_note,
+            include_address=include_address,
+        )
         member_fields = list(MEMBER_FIELDS)
         if include_email:
             member_fields.append("email")
@@ -763,6 +848,8 @@ class PatreonAPI:
         include_content: bool = False,
     ) -> PostPage:
         _validate_page_size(page_size)
+        if include_content and page_size > 100:
+            raise PatreonError("page_size must be at most 100 when include_content=True.")
         resolved_id = await self._resolve_campaign_id(campaign_id)
 
         post_fields = list(POST_FIELDS)
@@ -800,11 +887,15 @@ class PatreonAPI:
             raise PatreonError("Patreon returned no post data.")
         return _normalize_post(data, _included_index(payload))
 
-    async def list_webhooks(self) -> WebhookList:
+    async def list_webhooks(self, *, include_secrets: bool = False) -> WebhookList:
         payload = await self.client.request(
             "GET", "webhooks", params={"fields[webhook]": _csv(WEBHOOK_FIELDS)}
         )
-        return WebhookList(webhooks=[_normalize_webhook(item) for item in _resource_list(payload)])
+        webhooks = [_normalize_webhook(item) for item in _resource_list(payload)]
+        if not include_secrets:
+            for webhook in webhooks:
+                webhook.secret = None
+        return WebhookList(webhooks=webhooks)
 
     async def create_webhook(
         self,
@@ -812,7 +903,7 @@ class PatreonAPI:
         triggers: Sequence[str],
         campaign_id: str | None = None,
     ) -> Webhook:
-        uri = _validate_webhook_uri(uri)
+        uri = _validate_webhook_uri(uri, self.webhook_allowed_hosts)
         trigger_list = _validate_triggers(triggers)
         resolved_id = await self._resolve_campaign_id(campaign_id)
 
@@ -840,7 +931,7 @@ class PatreonAPI:
         webhook_id = _validate_id(webhook_id, "webhook_id")
         attributes: dict[str, Any] = {}
         if uri is not None:
-            attributes["uri"] = _validate_webhook_uri(uri)
+            attributes["uri"] = _validate_webhook_uri(uri, self.webhook_allowed_hosts)
         if triggers is not None:
             attributes["triggers"] = _validate_triggers(triggers)
         if paused is not None:
@@ -879,9 +970,20 @@ class PatreonAPI:
         scheduled_for: str | None = None,
         live_access_rule_ids: Sequence[int] | None = None,
     ) -> Live:
+        if not isinstance(title, str):
+            raise PatreonError("title must be a string.")
         title = title.strip()
         if not title:
             raise PatreonError("title must not be empty.")
+        if len(title) > MAX_LIVE_TITLE_CHARS:
+            raise PatreonError(f"title must be at most {MAX_LIVE_TITLE_CHARS} characters.")
+        if description is not None:
+            if not isinstance(description, str):
+                raise PatreonError("description must be a string.")
+            if len(description) > MAX_LIVE_DESCRIPTION_CHARS:
+                raise PatreonError(
+                    f"description must be at most {MAX_LIVE_DESCRIPTION_CHARS} characters."
+                )
         if state not in LIVE_CREATE_STATES:
             raise PatreonError("state must be 'pre_live' or 'live' when creating a live.")
 
@@ -898,6 +1000,10 @@ class PatreonAPI:
         if live_access_rule_ids is not None:
             if not live_access_rule_ids:
                 raise PatreonError("live_access_rule_ids must not be empty when provided.")
+            if len(live_access_rule_ids) > MAX_LIVE_ACCESS_RULES:
+                raise PatreonError(
+                    f"At most {MAX_LIVE_ACCESS_RULES} live_access_rule_ids are allowed."
+                )
             if any(not isinstance(item, int) or item <= 0 for item in live_access_rule_ids):
                 raise PatreonError("live_access_rule_ids must contain positive integers.")
             attributes["live_access_rule_ids"] = list(live_access_rule_ids)
@@ -909,7 +1015,7 @@ class PatreonAPI:
             raise PatreonError("Patreon returned no live data after creation.")
         return _normalize_live(data)
 
-    async def get_live(self, live_id: str) -> Live:
+    async def get_live(self, live_id: str, *, include_stream_key: bool = False) -> Live:
         live_id = _validate_id(live_id, "live_id")
         payload = await self.client.request(
             "GET",
@@ -919,7 +1025,10 @@ class PatreonAPI:
         data = payload.get("data")
         if not isinstance(data, dict):
             raise PatreonError("Patreon returned no live data.")
-        return _normalize_live(data)
+        live = _normalize_live(data)
+        if not include_stream_key:
+            live.stream_key = None
+        return live
 
     async def update_live(self, live_id: str, state: str) -> Live:
         live_id = _validate_id(live_id, "live_id")

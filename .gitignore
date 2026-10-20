@@ -15,8 +15,17 @@ wheels/
 !.env.example
 *.tokens.json
 tokens.json
+*token*.json
+*cookie*
+*.session
+.envrc
+*.pem
+*.key
 
 # Tool caches
 .pytest_cache/
 .ruff_cache/
 cookies.txt
+
+# macOS
+.DS_Store

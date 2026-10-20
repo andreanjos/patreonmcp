@@ -65,6 +65,18 @@ DELETE = ToolAnnotations(
     idempotent_hint=True,
     open_world_hint=True,
 )
+WEBHOOK_CREATE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
+WEBHOOK_UPDATE = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
+)
 
 INSTRUCTIONS = """\
 Patreon creator data via the official Patreon API v2.
@@ -129,20 +141,39 @@ def create_server(
 
     @asynccontextmanager
     async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
-        if api is not None or web_api is not None:
-            yield AppContext(
-                api=api or PatreonAPI(PatreonClient(settings)),
-                web=web_api,
-            )
+        if api is not None:
+            yield AppContext(api=api, web=web_api)
+            return
+        if web_api is not None:
+            async with PatreonClient(settings) as client:
+                yield AppContext(
+                    api=PatreonAPI(
+                        client,
+                        webhook_allowed_hosts=settings.webhook_allowed_hosts,
+                        allow_pii=settings.allow_pii,
+                    ),
+                    web=web_api,
+                )
             return
 
         async with PatreonClient(settings) as client:
             if not settings.has_session:
-                yield AppContext(api=PatreonAPI(client), web=None)
+                yield AppContext(
+                    api=PatreonAPI(
+                        client,
+                        webhook_allowed_hosts=settings.webhook_allowed_hosts,
+                        allow_pii=settings.allow_pii,
+                    ),
+                    web=None,
+                )
                 return
             async with PatreonWebClient(settings) as web_client:
                 yield AppContext(
-                    api=PatreonAPI(client),
+                    api=PatreonAPI(
+                        client,
+                        webhook_allowed_hosts=settings.webhook_allowed_hosts,
+                        allow_pii=settings.allow_pii,
+                    ),
                     web=PatreonWebAPI(web_client),
                 )
 
@@ -238,8 +269,9 @@ def create_server(
             bool,
             Field(
                 description=(
-                    "Include patron email addresses. Requires the "
-                    "campaigns.members[email] scope; patrons may hide it."
+                    "Include patron email addresses. Requires "
+                    "PATREON_ALLOW_PII=1 and the campaigns.members[email] scope; "
+                    "patrons may hide it."
                 )
             ),
         ] = False,
@@ -250,8 +282,8 @@ def create_server(
             bool,
             Field(
                 description=(
-                    "Include shipping addresses. Requires the "
-                    "campaigns.members.address scope; handle as sensitive data."
+                    "Include shipping addresses. Requires PATREON_ALLOW_PII=1 "
+                    "and the campaigns.members.address scope; handle as sensitive data."
                 )
             ),
         ] = False,
@@ -296,8 +328,8 @@ def create_server(
             bool,
             Field(
                 description=(
-                    "Include the member's shipping address. Requires the "
-                    "campaigns.members.address scope."
+                    "Include the member's shipping address. Requires "
+                    "PATREON_ALLOW_PII=1 and the campaigns.members.address scope."
                 )
             ),
         ] = False,
@@ -418,6 +450,16 @@ def create_server(
                 )
             ),
         ] = None,
+        allow_html: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Publish raw HTML. Off by default: content and teaser are "
+                    "escaped as plain text. Raw HTML can include links, embeds, "
+                    "and tracking pixels."
+                )
+            ),
+        ] = False,
     ) -> Post:
         """Create a text post through Patreon's web editor API.
 
@@ -437,6 +479,7 @@ def create_server(
                 scheduled_for=scheduled_for,
                 tags=tags,
                 campaign_id=campaign_id,
+                allow_html=allow_html,
             )
         )
 
@@ -476,6 +519,15 @@ def create_server(
             str | None,
             Field(description="Campaign ID used to resolve tier_ids."),
         ] = None,
+        allow_html: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Publish raw HTML. Off by default: content and teaser are "
+                    "escaped as plain text."
+                )
+            ),
+        ] = False,
     ) -> Post:
         """Update or publish an existing post through Patreon's web editor API.
 
@@ -496,6 +548,7 @@ def create_server(
                 scheduled_for=scheduled_for,
                 tags=tags,
                 campaign_id=campaign_id,
+                allow_html=allow_html,
             )
         )
 
@@ -525,7 +578,7 @@ def create_server(
         ctx: Context,
         post_id: Annotated[str, Field(description="Patreon post ID.")],
     ) -> Post:
-        """Get a post, draft, or scheduled post through the web editor API."""
+        """Get a post/draft via the web API; content is capped at 100,000 characters."""
 
         return await _guard(_web(ctx).get_post(post_id))
 
@@ -549,12 +602,23 @@ def create_server(
         return await _guard(_web(ctx).list_drafts(campaign_id, cursor=cursor, page_size=page_size))
 
     @mcp.tool(annotations=READ_ONLY)
-    async def list_webhooks(ctx: Context) -> WebhookList:
-        """List this API client's webhooks, including their HMAC signing secrets."""
+    async def list_webhooks(
+        ctx: Context,
+        include_secrets: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include HMAC signing secrets. Off by default because they are "
+                    "account credentials."
+                )
+            ),
+        ] = False,
+    ) -> WebhookList:
+        """List this API client's webhooks. Signing secrets are redacted by default."""
 
-        return await _guard(_api(ctx).list_webhooks())
+        return await _guard(_api(ctx).list_webhooks(include_secrets=include_secrets))
 
-    @mcp.tool(annotations=CREATE)
+    @mcp.tool(annotations=WEBHOOK_CREATE)
     async def create_webhook(
         ctx: Context,
         uri: Annotated[
@@ -577,11 +641,15 @@ def create_server(
             ),
         ] = None,
     ) -> Webhook:
-        """Create a webhook. The response includes the HMAC signing secret."""
+        """Create a webhook. The response includes the HMAC signing secret.
+
+        Disabled unless PATREON_WEBHOOK_ALLOWED_HOSTS permits the target host.
+        This is a persistent data-export channel; clients should require approval.
+        """
 
         return await _guard(_api(ctx).create_webhook(uri, triggers, campaign_id=campaign_id))
 
-    @mcp.tool(annotations=UPDATE)
+    @mcp.tool(annotations=WEBHOOK_UPDATE)
     async def update_webhook(
         ctx: Context,
         webhook_id: Annotated[str, Field(description="Webhook ID.")],
@@ -598,7 +666,11 @@ def create_server(
             ),
         ] = None,
     ) -> Webhook:
-        """Update a webhook's URI, triggers, or paused state."""
+        """Update a webhook's URI, triggers, or paused state.
+
+        Changing the URI requires PATREON_WEBHOOK_ALLOWED_HOSTS to permit the host.
+        Unpausing can redeliver queued patron events.
+        """
 
         return await _guard(
             _api(ctx).update_webhook(webhook_id, uri=uri, triggers=triggers, paused=paused)
@@ -661,10 +733,22 @@ def create_server(
     async def get_live(
         ctx: Context,
         live_id: Annotated[str, Field(description="Live ID.")],
+        include_stream_key: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include the RTMP stream key. Off by default because it is a "
+                    "streaming credential."
+                )
+            ),
+        ] = False,
     ) -> Live:
-        """Get a livestream's state and RTMP connection details, including its stream key."""
+        """Get a livestream's state and RTMP connection details.
 
-        return await _guard(_api(ctx).get_live(live_id))
+        The stream key is redacted unless include_stream_key is true.
+        """
+
+        return await _guard(_api(ctx).get_live(live_id, include_stream_key=include_stream_key))
 
     @mcp.tool(annotations=UPDATE)
     async def update_live(

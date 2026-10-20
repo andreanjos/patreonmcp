@@ -16,13 +16,26 @@ async def no_sleep(_seconds: float) -> None:
     return None
 
 
-def make_api(handler, settings: Settings | None = None) -> tuple[PatreonAPI, PatreonClient]:
+def make_api(
+    handler,
+    settings: Settings | None = None,
+    *,
+    webhook_allowed_hosts: tuple[str, ...] = ("example.com",),
+    allow_pii: bool = True,
+) -> tuple[PatreonAPI, PatreonClient]:
     client = PatreonClient(
         settings or Settings(access_token="test-token"),
         transport=httpx2.MockTransport(handler),
         sleep=no_sleep,
     )
-    return PatreonAPI(client), client
+    return (
+        PatreonAPI(
+            client,
+            webhook_allowed_hosts=webhook_allowed_hosts,
+            allow_pii=allow_pii,
+        ),
+        client,
+    )
 
 
 def json_response(payload: dict, status_code: int = 200) -> httpx2.Response:
@@ -499,3 +512,224 @@ async def test_campaign_resolution_rejects_ambiguous_results() -> None:
     with pytest.raises(PatreonError, match="Multiple campaigns"):
         await api.get_campaign()
     await client.aclose()
+
+
+async def test_post_is_not_retried_on_gateway_errors() -> None:
+    calls: list[str] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.method)
+        return json_response({"errors": [{"detail": "gateway"}]}, status_code=503)
+
+    api, client = make_api(handler)
+    with pytest.raises(PatreonError):
+        await client.request("POST", "webhooks", json_body={"data": {}})
+    await client.aclose()
+
+    assert calls == ["POST"]
+
+
+async def test_get_is_retried_on_gateway_errors() -> None:
+    calls: list[str] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request.method)
+        if len(calls) == 1:
+            return json_response({"errors": [{"detail": "gateway"}]}, status_code=503)
+        return json_response({"data": []})
+
+    api, client = make_api(handler)
+    payload = await client.request("GET", "campaigns")
+    await client.aclose()
+
+    assert payload == {"data": []}
+    assert calls == ["GET", "GET"]
+
+
+async def test_webhook_host_allowlist_is_enforced() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler)
+    restricted = PatreonAPI(client, webhook_allowed_hosts=("hooks.example.com",))
+    with pytest.raises(PatreonError, match="PATREON_WEBHOOK_ALLOWED_HOSTS"):
+        await restricted.create_webhook(
+            "https://evil.example/hook", ["members:create"], campaign_id="42"
+        )
+    await client.aclose()
+
+
+async def test_token_write_replaces_symlink_without_touching_target(tmp_path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text("keep", encoding="utf-8")
+    token_file = tmp_path / "tokens.json"
+    token_file.symlink_to(target)
+
+    client = PatreonClient(
+        Settings(
+            access_token="access",
+            refresh_token="refresh",
+            token_file=token_file,
+        )
+    )
+    client._save_tokens({"token_type": "Bearer"}, None)
+    await client.aclose()
+
+    assert not token_file.is_symlink()
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert json.loads(token_file.read_text(encoding="utf-8"))["access_token"] == "access"
+
+
+async def test_refresh_without_expires_in_clears_stale_expiry(tmp_path) -> None:
+    token_calls = 0
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal token_calls
+        if request.url.path == "/api/oauth2/token":
+            token_calls += 1
+            return json_response({"access_token": "fresh", "refresh_token": "r2"})
+        if request.headers.get("authorization") == "Bearer old":
+            return json_response({}, status_code=401)
+        assert request.headers.get("authorization") == "Bearer fresh"
+        return json_response(
+            {"data": {"type": "user", "id": "1", "attributes": {"full_name": "C"}}}
+        )
+
+    settings = Settings(
+        access_token="old",
+        refresh_token="r1",
+        client_id="c",
+        client_secret="s",
+        token_file=tmp_path / "tokens.json",
+        expires_at=1.0,
+    )
+    api, client = make_api(handler, settings)
+    await api.get_identity(include_campaign=False)
+    await api.get_identity(include_campaign=False)
+    await client.aclose()
+
+    assert token_calls == 1
+    assert client.settings.expires_at is None
+
+
+async def test_webhook_writes_are_disabled_without_allowlist() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler, webhook_allowed_hosts=())
+    with pytest.raises(PatreonError, match="Webhook writes are disabled"):
+        await api.create_webhook("https://example.com/hook", ["members:create"], campaign_id="42")
+    await client.aclose()
+
+
+async def test_webhook_secret_is_redacted_by_default() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return json_response(
+            {
+                "data": [
+                    {
+                        "type": "webhook",
+                        "id": "wh1",
+                        "attributes": {"uri": "https://example.com", "secret": "s3cret"},
+                    }
+                ]
+            }
+        )
+
+    api, client = make_api(handler)
+    redacted = await api.list_webhooks()
+    revealed = await api.list_webhooks(include_secrets=True)
+    await client.aclose()
+
+    assert redacted.webhooks[0].secret is None
+    assert revealed.webhooks[0].secret == "s3cret"
+
+
+async def test_live_stream_key_is_redacted_by_default() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return json_response(
+            {
+                "data": {
+                    "type": "live",
+                    "id": "1",
+                    "attributes": {"stream_key": "rtmp-secret"},
+                }
+            }
+        )
+
+    api, client = make_api(handler)
+    redacted = await api.get_live("1")
+    revealed = await api.get_live("1", include_stream_key=True)
+    await client.aclose()
+
+    assert redacted.stream_key is None
+    assert revealed.stream_key == "rtmp-secret"
+
+
+async def test_pii_fields_are_disabled_by_default() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler, allow_pii=False)
+    with pytest.raises(PatreonError, match="PATREON_ALLOW_PII"):
+        await api.list_members("42", include_email=True)
+    await client.aclose()
+
+
+async def test_webhook_private_ip_targets_are_rejected() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler, webhook_allowed_hosts=("*",))
+    with pytest.raises(PatreonError, match="private, loopback"):
+        await api.create_webhook("https://127.0.0.1/hook", ["members:create"], campaign_id="42")
+    await client.aclose()
+
+
+async def test_refresh_adopts_token_written_by_another_process(tmp_path) -> None:
+    token_file = tmp_path / "tokens.json"
+    token_file.write_text('{"access_token":"shared","refresh_token":"r2","expires_at":null}')
+    token_file.chmod(0o600)
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/oauth2/token":  # pragma: no cover
+            raise AssertionError("should adopt the shared token without refreshing")
+        assert request.headers["authorization"] == "Bearer shared"
+        return json_response(
+            {"data": {"type": "user", "id": "1", "attributes": {"full_name": "C"}}}
+        )
+
+    settings = Settings(
+        access_token="stale",
+        refresh_token="r1",
+        client_id="c",
+        client_secret="s",
+        token_file=token_file,
+        expires_at=1.0,
+    )
+    api, client = make_api(handler, settings)
+    await api.get_identity(include_campaign=False)
+    await client.aclose()
+
+    assert client.settings.access_token == "shared"
+    assert client.settings.refresh_token == "r2"
+
+
+async def test_post_content_is_capped() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return json_response(
+            {
+                "data": {
+                    "type": "post",
+                    "id": "1",
+                    "attributes": {"title": "T", "content": "x" * 100_001},
+                }
+            }
+        )
+
+    api, client = make_api(handler)
+    post = await api.get_post("1")
+    await client.aclose()
+
+    assert post.content_truncated is True
+    assert len(post.content or "") == 100_000

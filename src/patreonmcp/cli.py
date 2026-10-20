@@ -15,6 +15,15 @@ from .config import ConfigError, Settings, load_settings
 from .server import create_server
 from .web_api import PatreonWebAPI, PatreonWebClient
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_loopback_host(host: str) -> bool:
+    # The MCP SDK auto-enables DNS-rebinding protection only for this exact set.
+    # Do not broaden it to all of 127/8; the SDK would leave protection off.
+    normalized = host.strip().lower().strip("[]")
+    return normalized in LOOPBACK_HOSTS
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -34,6 +43,14 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="HTTP bind host.")
     serve.add_argument("--port", type=int, default=8000, help="HTTP bind port.")
     serve.add_argument(
+        "--allow-remote-http",
+        action="store_true",
+        help=(
+            "Allow binding the unauthenticated HTTP transport beyond loopback. "
+            "Put it behind an authenticated proxy if you use this."
+        ),
+    )
+    serve.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="WARNING",
@@ -48,28 +65,45 @@ def _parser() -> argparse.ArgumentParser:
 
 
 async def _check(settings: Settings) -> int:
+    failed = False
+
     if settings.access_token or settings.can_refresh:
-        async with PatreonClient(settings) as client:
-            api = PatreonAPI(client)
-            user = await api.get_identity(include_campaign=False)
-            campaigns = await api.list_campaigns(include_tiers=False)
-            name = user.full_name or user.first_name or user.vanity or user.id
-            print(f"OAuth token authenticated as {name} (user {user.id}).")
-            if not campaigns.campaigns:
-                print("No campaigns are visible to this token.")
-            else:
-                print(f"Visible campaigns: {len(campaigns.campaigns)}")
-                for campaign in campaigns.campaigns:
-                    label = campaign.name or campaign.creation_name or campaign.id
-                    patrons = campaign.patron_count if campaign.patron_count is not None else "?"
-                    print(f"  {campaign.id}  {label}  patrons={patrons}")
+        try:
+            async with PatreonClient(settings) as client:
+                api = PatreonAPI(client)
+                user = await api.get_identity(include_campaign=False)
+                campaigns = await api.list_campaigns(include_tiers=False)
+                name = user.full_name or user.first_name or user.vanity or user.id
+                print(f"OAuth token authenticated as {name} (user {user.id}).")
+                if not campaigns.campaigns:
+                    print("No campaigns are visible to this token.")
+                else:
+                    print(f"Visible campaigns: {len(campaigns.campaigns)}")
+                    for campaign in campaigns.campaigns:
+                        label = campaign.name or campaign.creation_name or campaign.id
+                        patrons = (
+                            campaign.patron_count if campaign.patron_count is not None else "?"
+                        )
+                        print(f"  {campaign.id}  {label}  patrons={patrons}")
+        except PatreonError as exc:
+            print(f"patreonmcp: OAuth check failed: {exc}", file=sys.stderr)
+            failed = True
 
     if settings.has_session:
-        async with PatreonWebClient(settings) as web_client:
-            web = PatreonWebAPI(web_client)
-            campaign_id = await web.get_current_campaign_id()
-            print(f"Web post session authenticated for campaign {campaign_id}.")
-    return 0
+        try:
+            async with PatreonWebClient(settings) as web_client:
+                web = PatreonWebAPI(web_client)
+                campaign_id = await web.get_current_campaign_id()
+                await web_client.check_csrf()
+                print(
+                    "Web post session authenticated for campaign "
+                    f"{campaign_id}; CSRF ticket verified."
+                )
+        except PatreonError as exc:
+            print(f"patreonmcp: web session check failed: {exc}", file=sys.stderr)
+            failed = True
+
+    return 1 if failed else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -83,6 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.host = "127.0.0.1"
         args.port = 8000
         args.log_level = "WARNING"
+        args.allow_remote_http = False
 
     try:
         settings = load_settings().require_auth()
@@ -96,6 +131,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         except PatreonError as exc:
             print(f"patreonmcp: {exc}", file=sys.stderr)
             return 1
+
+    if args.transport == "streamable-http":
+        if not 1 <= args.port <= 65535:
+            print("patreonmcp: --port must be between 1 and 65535.", file=sys.stderr)
+            return 2
+        if not _is_loopback_host(args.host) and not args.allow_remote_http:
+            print(
+                "patreonmcp: refusing to expose the unauthenticated HTTP transport "
+                "beyond loopback. Pass --allow-remote-http only behind an "
+                "authenticated proxy.",
+                file=sys.stderr,
+            )
+            return 2
+        if not _is_loopback_host(args.host):
+            print(
+                "patreonmcp: warning: streamable HTTP has no built-in authentication; "
+                "anyone who can reach the port can call destructive tools.",
+                file=sys.stderr,
+            )
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),

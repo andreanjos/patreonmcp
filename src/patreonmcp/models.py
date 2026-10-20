@@ -123,6 +123,7 @@ class Post(PatreonModel):
     embed_data: dict | None = None
     app_status: str | None = None
     current_user_can_edit: bool | None = None
+    content_truncated: bool = False
     tier_ids: list[str] = Field(default_factory=list)
     access_rule_types: list[str] = Field(default_factory=list)
 

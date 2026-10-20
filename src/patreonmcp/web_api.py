@@ -8,7 +8,9 @@ CSRF ticket. Those routes are what this module speaks to.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -40,9 +42,49 @@ CSRF_PATH = "/REST/auth/CSRFTicket"
 CSRF_HEADER = "X-CSRF-Signature"
 CSRF_TTL_SECONDS = 300.0
 MAX_RETRY_WAIT_SECONDS = 5.0
+MAX_RESPONSE_BYTES = 8_388_608
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"})
+_CSRF_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{4,512}$")
 
 POST_VISIBILITIES = frozenset({"public", "paid", "tiers"})
 POST_TYPES = frozenset({"text_only"})
+MAX_TITLE_CHARS = 500
+MAX_CONTENT_CHARS = 1_000_000
+MAX_TEASER_CHARS = 5_000
+MAX_TAGS = 50
+MAX_TAG_CHARS = 100
+MAX_TIER_IDS = 100
+
+
+def _normalize_tags(tags: Sequence[str]) -> list[str]:
+    if isinstance(tags, str):
+        raise PatreonError("tags must be a list of strings, not a single string.")
+    normalized: list[str] = []
+    for tag in tags:
+        if not isinstance(tag, str):
+            raise PatreonError("Each tag must be a string.")
+        value = tag.strip()
+        if not value:
+            continue
+        if len(value) > MAX_TAG_CHARS:
+            raise PatreonError(f"Each tag must be at most {MAX_TAG_CHARS} characters.")
+        normalized.append(value)
+    if len(normalized) > MAX_TAGS:
+        raise PatreonError(f"At most {MAX_TAGS} tags are allowed.")
+    return list(dict.fromkeys(normalized))
+
+
+def _normalize_tier_ids(tier_ids: Sequence[str]) -> list[str]:
+    if isinstance(tier_ids, str):
+        raise PatreonError("tier_ids must be a list, not a single string.")
+    normalized: list[str] = []
+    for item in tier_ids:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise PatreonError("Each tier_id must be a string or integer.")
+        normalized.append(_validate_id(str(item).strip(), "tier_id"))
+    if len(normalized) > MAX_TIER_IDS:
+        raise PatreonError(f"At most {MAX_TIER_IDS} tier_ids are allowed.")
+    return list(dict.fromkeys(normalized))
 
 
 def _plain_text_document(text: str) -> dict[str, Any]:
@@ -98,7 +140,13 @@ def _payload_errors(payload: Any) -> tuple[str | None, str | None, float | None]
         return None, None, None
     errors = payload.get("errors")
     if not isinstance(errors, list) or not errors:
-        return None, None, None
+        description = payload.get("error_description") or payload.get("error")
+        code = payload.get("error")
+        return (
+            str(description) if description else None,
+            str(code) if code else None,
+            None,
+        )
     first = errors[0] if isinstance(errors[0], dict) else {}
     detail = first.get("detail") or first.get("title")
     code = first.get("code_name") or first.get("code")
@@ -160,10 +208,7 @@ class PatreonWebClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _csrf(self, uri: str) -> str:
-        now = self._clock()
-        if self._csrf_token and self._csrf_uri == uri and now - self._csrf_at < CSRF_TTL_SECONDS:
-            return self._csrf_token
+    async def _fetch_csrf(self, uri: str) -> dict[str, Any]:
         try:
             response = await self._http.get(
                 CSRF_PATH,
@@ -177,16 +222,42 @@ class PatreonWebClient:
 
         payload = self._maybe_json(response)
         token = payload.get("token") if isinstance(payload, dict) else None
-        if response.status_code >= 400 or not token:
+        if (
+            response.status_code >= 400
+            or not isinstance(token, str)
+            or not _CSRF_TOKEN_PATTERN.fullmatch(token)
+        ):
             detail, code, _ = _payload_errors(payload)
             raise PatreonAuthError(
                 detail
-                or "Patreon did not issue a CSRF ticket. The web session may be "
-                "missing or expired.",
+                or "Patreon did not issue a valid CSRF ticket. The web session may "
+                "be missing or expired.",
                 status_code=response.status_code,
                 code=code or "csrf_failed",
             )
-        self._csrf_token = str(token)
+        return payload
+
+    async def check_csrf(self) -> None:
+        """Verify a fresh ticket is bound to a real web session.
+
+        Unauthenticated ticket requests still return a token, but with empty
+        ``URI``/``time`` metadata. A session-bound ticket carries both.
+        """
+
+        payload = await self._fetch_csrf("/posts/new")
+        if not payload.get("URI") or payload.get("time") in (None, ""):
+            raise PatreonAuthError(
+                "Patreon issued an anonymous CSRF ticket (empty URI/time); the "
+                "web session is not authenticated.",
+                code="csrf_not_authenticated",
+            )
+
+    async def _csrf(self, uri: str) -> str:
+        now = self._clock()
+        if self._csrf_token and self._csrf_uri == uri and now - self._csrf_at < CSRF_TTL_SECONDS:
+            return self._csrf_token
+        payload = await self._fetch_csrf(uri)
+        self._csrf_token = str(payload["token"])
         self._csrf_uri = uri
         self._csrf_at = now
         return self._csrf_token
@@ -234,10 +305,14 @@ class PatreonWebClient:
                 ) from exc
 
             if response.status_code == 403 and needs_csrf and not csrf_retried:
-                self._csrf_token = None
-                headers[CSRF_HEADER] = await self._csrf(csrf_uri)
-                csrf_retried = True
-                continue
+                _, error_code, _ = _payload_errors(self._maybe_json(response))
+                if method.upper() in _RETRYABLE_METHODS or (
+                    error_code and "csrf" in error_code.lower()
+                ):
+                    self._csrf_token = None
+                    headers[CSRF_HEADER] = await self._csrf(csrf_uri)
+                    csrf_retried = True
+                    continue
 
             if response.status_code == 429:
                 retry_after = self._retry_after(response)
@@ -251,13 +326,28 @@ class PatreonWebClient:
                     continue
                 self._raise(response)
 
-            if response.status_code in (502, 503, 504) and retries == 0:
+            if (
+                response.status_code in (502, 503, 504)
+                and retries == 0
+                and method.upper() in _RETRYABLE_METHODS
+            ):
                 retries += 1
                 await self._sleep(0.5)
                 continue
 
             if response.status_code >= 400:
                 self._raise(response)
+
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_RESPONSE_BYTES:
+                        raise PatreonError(
+                            "Patreon response exceeded the 8 MiB response limit.",
+                            status_code=response.status_code,
+                        )
+                except ValueError:
+                    pass
 
             if response.status_code == 204 or not response.content:
                 return {}
@@ -382,6 +472,7 @@ class PatreonWebAPI:
         index = _included_index(payload)
         wanted = {str(item) for item in tier_ids}
         found: list[str] = []
+        matched: set[str] = set()
         for rule in index.values():
             if rule.get("type") != "access-rule":
                 continue
@@ -390,11 +481,10 @@ class PatreonWebAPI:
             tier_data = tier_rel.get("data") if isinstance(tier_rel, dict) else None
             if isinstance(tier_data, dict) and str(tier_data.get("id")) in wanted:
                 found.append(str(rule.get("id")))
-        if not found:
-            raise PatreonError(
-                "None of the requested tier_ids matched an access rule on the "
-                "current campaign. Check the tier IDs."
-            )
+                matched.add(str(tier_data.get("id")))
+        missing = sorted(wanted - matched)
+        if missing:
+            raise PatreonError("Unknown tier_ids for this campaign: " + ", ".join(missing))
         return list(dict.fromkeys(found))
 
     async def _build_post_payload(
@@ -410,22 +500,45 @@ class PatreonWebAPI:
         tags: Sequence[str] | None = None,
         campaign_id: str | None = None,
         post_type: str | None = None,
+        allow_html: bool = False,
+        clear_scheduled_for: bool = False,
     ) -> dict[str, Any]:
         attributes: dict[str, Any] = {}
         if title is not None:
+            if not isinstance(title, str):
+                raise PatreonError("title must be a string.")
             title = title.strip()
             if not title:
                 raise PatreonError("title must not be empty.")
+            if len(title) > MAX_TITLE_CHARS:
+                raise PatreonError(f"title must be at most {MAX_TITLE_CHARS} characters.")
             attributes["title"] = title
         if content is not None:
+            if not isinstance(content, str):
+                raise PatreonError("content must be a string.")
+            if len(content) > MAX_CONTENT_CHARS:
+                raise PatreonError(f"content must be at most {MAX_CONTENT_CHARS} characters.")
             normalized_content = content.replace("\r\n", "\n").replace("\r", "\n")
-            attributes["content"] = normalized_content
-            if "<" not in normalized_content and ">" not in normalized_content:
+            if allow_html:
+                attributes["content"] = normalized_content
+                if "<" not in normalized_content and ">" not in normalized_content:
+                    attributes["content_json_string"] = json.dumps(
+                        _plain_text_document(normalized_content)
+                    )
+            else:
+                attributes["content"] = html.escape(normalized_content)
                 attributes["content_json_string"] = json.dumps(
                     _plain_text_document(normalized_content)
                 )
         if teaser_text is not None:
-            attributes["teaser_text"] = teaser_text.replace("\r\n", "\n").replace("\r", "\n")
+            if not isinstance(teaser_text, str):
+                raise PatreonError("teaser_text must be a string.")
+            if len(teaser_text) > MAX_TEASER_CHARS:
+                raise PatreonError(f"teaser_text must be at most {MAX_TEASER_CHARS} characters.")
+            normalized_teaser = teaser_text.replace("\r\n", "\n").replace("\r", "\n")
+            attributes["teaser_text"] = (
+                normalized_teaser if allow_html else html.escape(normalized_teaser)
+            )
         if post_type is not None:
             if post_type not in POST_TYPES:
                 raise PatreonError(
@@ -438,6 +551,8 @@ class PatreonWebAPI:
             attributes["post_visibility"] = "paid" if visibility == "tiers" else visibility
         if scheduled_for is not None:
             attributes["scheduled_for"] = _normalize_scheduled_for(scheduled_for)
+        elif clear_scheduled_for:
+            attributes["scheduled_for"] = None
         if publish is not None:
             attributes["tags"] = {"publish": bool(publish)}
 
@@ -445,7 +560,7 @@ class PatreonWebAPI:
         included: list[dict[str, Any]] = []
 
         if visibility == "tiers":
-            tier_ids = tier_ids or []
+            tier_ids = _normalize_tier_ids(tier_ids or [])
             campaign = await self._campaign_id(campaign_id)
             rule_ids = await self._access_rule_ids(campaign, tier_ids)
             relationships["access_rules"] = {
@@ -458,7 +573,7 @@ class PatreonWebAPI:
             raise PatreonError("tier_ids may only be used with visibility='tiers'.")
 
         if tags is not None:
-            normalized_tags = list(dict.fromkeys(tag.strip() for tag in tags if tag.strip()))
+            normalized_tags = _normalize_tags(tags)
             relationships["user_defined_tags"] = {
                 "data": [
                     {"type": "post_tag", "id": f"user_defined;{tag}"} for tag in normalized_tags
@@ -497,9 +612,12 @@ class PatreonWebAPI:
         scheduled_for: str | None = None,
         tags: Sequence[str] | None = None,
         campaign_id: str | None = None,
+        allow_html: bool = False,
     ) -> Post:
         if visibility not in POST_VISIBILITIES:
             raise PatreonError("visibility must be 'public', 'paid', or 'tiers'.")
+        if not isinstance(title, str):
+            raise PatreonError("title must be a string.")
         title = title.strip()
         if not title:
             raise PatreonError("title must not be empty.")
@@ -509,6 +627,20 @@ class PatreonWebAPI:
             raise PatreonError("tier_ids is required when visibility is 'tiers'.")
         if visibility != "tiers" and tier_ids:
             raise PatreonError("tier_ids may only be used with visibility='tiers'.")
+
+        payload = await self._build_post_payload(
+            title=title,
+            content=content,
+            teaser_text=teaser_text,
+            visibility=visibility,
+            tier_ids=tier_ids,
+            publish=publish,
+            scheduled_for=scheduled_for,
+            tags=tags,
+            campaign_id=campaign_id,
+            post_type="text_only",
+            allow_html=allow_html,
+        )
 
         create_body = {
             "data": {
@@ -528,19 +660,7 @@ class PatreonWebAPI:
         post_id = str(data["id"])
 
         try:
-            return await self.update_post(
-                post_id,
-                title=title,
-                content=content,
-                teaser_text=teaser_text,
-                visibility=visibility,
-                tier_ids=tier_ids,
-                publish=publish,
-                scheduled_for=scheduled_for,
-                tags=tags,
-                campaign_id=campaign_id,
-                post_type="text_only",
-            )
+            return await self._patch_post(post_id, payload)
         except PatreonError as exc:
             raise PatreonError(
                 f"Created draft post {post_id}, but saving it failed: {exc}"
@@ -560,6 +680,7 @@ class PatreonWebAPI:
         tags: Sequence[str] | None = None,
         campaign_id: str | None = None,
         post_type: str | None = None,
+        allow_html: bool = False,
     ) -> Post:
         post_id = _validate_id(post_id, "post_id")
         if (
@@ -588,7 +709,12 @@ class PatreonWebAPI:
             tags=tags,
             campaign_id=campaign_id,
             post_type=post_type,
+            allow_html=allow_html,
+            clear_scheduled_for=publish is True,
         )
+        return await self._patch_post(post_id, payload)
+
+    async def _patch_post(self, post_id: str, payload: Mapping[str, Any]) -> Post:
         response = await self.client.request(
             "PATCH",
             f"/api/posts/{post_id}",
@@ -633,12 +759,20 @@ class PatreonWebAPI:
         *,
         cursor: str | None = None,
         page_size: int = 20,
+        include_content: bool = False,
     ) -> PostPage:
         _validate_page_size(page_size)
+        if include_content and page_size > 100:
+            raise PatreonError("page_size must be at most 100 when include_content=True.")
         resolved_campaign = await self._campaign_id(campaign_id)
+        fields = (
+            self.POST_FIELDS
+            if include_content
+            else tuple(field for field in self.POST_FIELDS if field != "content")
+        )
         params = _jsonapi_params(
             {
-                "fields[post]": _csv(self.POST_FIELDS),
+                "fields[post]": _csv(fields),
                 "include": "access_rules",
                 "fields[access-rule]": "access_rule_type",
                 "filter[campaign_id]": resolved_campaign,
