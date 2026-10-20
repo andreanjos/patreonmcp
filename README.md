@@ -336,15 +336,15 @@ flow, newly requested scopes are added to previously approved scopes.
 - Patron email, creator notes, and shipping addresses require
   `PATREON_ALLOW_PII=1`.
 - Webhook creation is disabled until `PATREON_WEBHOOK_ALLOWED_HOSTS` is set.
-- `list_webhooks` redacts signing secrets and `get_live` redacts stream keys
-  unless explicitly requested.
+- Webhook signing secrets and Live stream keys are redacted unless explicitly
+  requested.
 - Post content and teaser text are escaped unless `allow_html=true`; post
   content is capped at 100,000 characters.
 - HTTP transport binds to loopback; remote exposure requires
   `--allow-remote-http` plus `PATREON_HTTP_BEARER_TOKEN` (or a second explicit
   `--allow-unauthenticated-http` opt-in for a reverse proxy).
-- Token and cookie files must be regular files owned by the current user with
-  no group/other permissions (`chmod 600`).
+- On POSIX, token and cookie files must be regular files owned by the current
+  user with no group/other permissions (`chmod 600`).
 - Base URLs are pinned to `www.patreon.com` (or loopback for tests), so a
   rogue environment cannot redirect bearer tokens, refresh tokens, or session
   cookies to another host.
@@ -367,8 +367,10 @@ src/patreonmcp/
   config.py    # environment, token-file, and session-cookie loading
   models.py    # typed structured-output models
   web_api.py   # undocumented /api post create/edit client + CSRF
+  post_cli.py  # post list/get/create/update/publish/delete commands
+  http_auth.py # bearer-token guard for streamable HTTP
   server.py    # MCP tool registration
-  cli.py       # serve / check commands
+  cli.py       # serve / check / init / config commands
 ```
 
 Tests use `httpx2.MockTransport`; no network or real credentials are required.
