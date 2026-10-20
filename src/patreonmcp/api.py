@@ -168,8 +168,8 @@ def _validate_id(value: str, label: str) -> str:
 
 
 def _validate_page_size(page_size: int) -> int:
-    if not 1 <= page_size <= 1000:
-        raise PatreonError("page_size must be between 1 and 1000.")
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000:
+        raise PatreonError("page_size must be an integer between 1 and 1000.")
     return page_size
 
 
@@ -178,7 +178,10 @@ def _validate_webhook_uri(uri: str, allowed_hosts: Sequence[str] = ()) -> str:
         raise PatreonError("Webhook uri must be a string.")
     if len(uri) > MAX_WEBHOOK_URI_CHARS:
         raise PatreonError(f"Webhook uri must be at most {MAX_WEBHOOK_URI_CHARS} characters.")
-    parsed = urlparse(uri)
+    try:
+        parsed = urlparse(uri)
+    except ValueError as exc:
+        raise PatreonError("Webhook uri is not a valid URL.") from exc
     if parsed.scheme != "https" or not parsed.netloc:
         raise PatreonError("Webhook uri must be an absolute https:// URL.")
     if parsed.username or parsed.password:
@@ -237,9 +240,13 @@ def _validate_triggers(triggers: Sequence[str]) -> list[str]:
 
 
 def _normalize_scheduled_for(value: str) -> str:
+    if not isinstance(value, str):
+        raise PatreonError("scheduled_for must be a string.")
     raw = value.strip()
     if not raw:
         raise PatreonError("scheduled_for must not be empty.")
+    if len(raw) > 64:
+        raise PatreonError("scheduled_for is too long.")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:

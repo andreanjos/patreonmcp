@@ -211,3 +211,13 @@ def test_settings_repr_redacts_credentials() -> None:
 def test_pii_opt_in_is_parsed() -> None:
     assert load_settings({"PATREON_ACCESS_TOKEN": "x"}).allow_pii is False
     assert load_settings({"PATREON_ACCESS_TOKEN": "x", "PATREON_ALLOW_PII": "1"}).allow_pii is True
+
+
+def test_malformed_base_url_is_a_config_error() -> None:
+    with pytest.raises(ConfigError, match="valid URL"):
+        load_settings(
+            {
+                "PATREON_ACCESS_TOKEN": "x",
+                "PATREON_WEB_BASE_URL": "https://[::1",
+            }
+        )

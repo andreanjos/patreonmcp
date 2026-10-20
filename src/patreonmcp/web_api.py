@@ -450,6 +450,13 @@ class PatreonWebAPI:
         relation_data = campaign.get("data") if isinstance(campaign, dict) else None
         if isinstance(relation_data, dict) and relation_data.get("id") is not None:
             return _validate_id(str(relation_data["id"]), "campaign_id")
+        candidates = [
+            item
+            for item in _included_index(payload).values()
+            if item.get("type") == "campaign" and item.get("id") is not None
+        ]
+        if len(candidates) == 1:
+            return _validate_id(str(candidates[0]["id"]), "campaign_id")
         raise PatreonError(
             "Could not determine the current campaign from the web session. "
             "Pass campaign_id explicitly."

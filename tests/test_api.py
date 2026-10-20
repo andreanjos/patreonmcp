@@ -756,3 +756,69 @@ async def test_live_create_and_update_redact_stream_key_by_default() -> None:
     assert created.stream_key is None
     assert updated.stream_key is None
     assert revealed.stream_key == "rtmp-secret"
+
+
+async def test_webhook_rejects_alternate_ip_forms_and_local_hosts() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler, webhook_allowed_hosts=("*",))
+    for uri in (
+        "https://2130706433/hook",
+        "https://0x7f000001/hook",
+        "https://0177.0.0.1/hook",
+        "https://[::ffff:127.0.0.1]/hook",
+        "https://localhost/hook",
+    ):
+        with pytest.raises(PatreonError):
+            await api.create_webhook(uri, ["members:create"], campaign_id="42")
+    await client.aclose()
+
+
+async def test_unpausing_webhooks_requires_allowlist() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler, webhook_allowed_hosts=())
+    with pytest.raises(PatreonError, match="Unpausing"):
+        await api.update_webhook("wh1", paused=False)
+    await client.aclose()
+
+
+async def test_non_positive_expires_in_does_not_cause_refresh_storm(tmp_path) -> None:
+    token_calls = 0
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal token_calls
+        if request.url.path == "/api/oauth2/token":
+            token_calls += 1
+            return json_response({"access_token": "fresh", "refresh_token": "r2", "expires_in": -1})
+        return json_response(
+            {"data": {"type": "user", "id": "1", "attributes": {"full_name": "C"}}}
+        )
+
+    settings = Settings(
+        access_token="old",
+        refresh_token="r1",
+        client_id="c",
+        client_secret="s",
+        token_file=tmp_path / "tokens.json",
+        expires_at=1.0,
+    )
+    api, client = make_api(handler, settings)
+    await api.get_identity(include_campaign=False)
+    await api.get_identity(include_campaign=False)
+    await client.aclose()
+
+    assert token_calls == 1
+    assert client.settings.expires_at is None
+
+
+async def test_malformed_webhook_url_is_rejected() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:  # pragma: no cover
+        raise AssertionError("no HTTP request expected")
+
+    api, client = make_api(handler)
+    with pytest.raises(PatreonError, match="valid URL"):
+        await api.create_webhook("https://[::1", ["members:create"], campaign_id="42")
+    await client.aclose()

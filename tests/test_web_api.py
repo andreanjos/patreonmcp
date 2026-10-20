@@ -424,3 +424,23 @@ async def test_web_error_description_is_surfaced() -> None:
         await api.get_post("p1")
     await client.aclose()
     assert "invalid_request" in str(exc_info.value)
+
+
+async def test_campaign_resolution_can_use_included_campaign() -> None:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/current_user":
+            return json_response(
+                {
+                    "data": {"type": "user", "id": "u1"},
+                    "included": [{"type": "campaign", "id": "42", "attributes": {"name": "C"}}],
+                }
+            )
+        if request.url.path == "/api/posts":
+            assert request.url.params["filter[campaign_id]"] == "42"
+            return json_response({"data": [], "meta": {"pagination": {"total": 0}}})
+        raise AssertionError(f"unexpected request {request.url}")
+
+    api, client = make_web(handler)
+    page = await api.list_drafts()
+    await client.aclose()
+    assert page.posts == []

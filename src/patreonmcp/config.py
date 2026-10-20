@@ -83,15 +83,19 @@ def _clean(value: str | None) -> str | None:
 
 
 def _validate_base_url(value: str, name: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ConfigError(f"{name} is not a valid URL: {exc}") from exc
+    if parsed.scheme not in {"http", "https"} or not hostname:
         raise ConfigError(f"{name} must be an absolute http(s) URL.")
     if parsed.username or parsed.password:
         raise ConfigError(f"{name} must not contain embedded credentials.")
     loopback = {"127.0.0.1", "localhost", "::1"}
-    if parsed.hostname not in loopback and parsed.hostname != "www.patreon.com":
+    if hostname not in loopback and hostname != "www.patreon.com":
         raise ConfigError(f"{name} must point at www.patreon.com or loopback for local tests.")
-    if parsed.scheme == "http" and parsed.hostname not in loopback:
+    if parsed.scheme == "http" and hostname not in loopback:
         raise ConfigError(f"{name} must use https unless it points at loopback.")
     return value.rstrip("/")
 
@@ -239,11 +243,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         if allowed_hosts_raw
         else ()
     )
-    if any(urlparse(f"//{host}").hostname != host for host in allowed_hosts):
-        raise ConfigError(
-            "PATREON_WEBHOOK_ALLOWED_HOSTS must be comma-separated hostnames "
-            "without schemes or ports."
-        )
+    for host in allowed_hosts:
+        try:
+            parsed_host = urlparse(f"//{host}").hostname
+        except ValueError:
+            parsed_host = None
+        if parsed_host != host:
+            raise ConfigError(
+                "PATREON_WEBHOOK_ALLOWED_HOSTS must be comma-separated hostnames "
+                "without schemes or ports."
+            )
 
     api_base_url = _validate_base_url(
         _clean(env.get("PATREON_API_BASE_URL")) or DEFAULT_API_BASE_URL,

@@ -389,7 +389,8 @@ class PatreonClient:
 
         expires_in = payload.get("expires_in")
         try:
-            expires_at = self._clock() + float(expires_in)
+            seconds = float(expires_in)
+            expires_at = self._clock() + seconds if seconds > 0 else None
         except (TypeError, ValueError):
             expires_at = None
 
