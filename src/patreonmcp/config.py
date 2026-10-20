@@ -35,6 +35,7 @@ class Settings:
     session_cookie_file: Path | None = None
     web_user_agent: str | None = None
     http_bearer_token: str | None = field(default=None, repr=False)
+    adopt_token_file: bool = True
     webhook_allowed_hosts: tuple[str, ...] = ()
     allow_pii: bool = False
     api_base_url: str = DEFAULT_API_BASE_URL
@@ -282,6 +283,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         session_cookie_file=session_cookie_file,
         web_user_agent=_clean(env.get("PATREON_USER_AGENT")),
         http_bearer_token=http_bearer_token,
+        adopt_token_file=not bool(env_access),
         webhook_allowed_hosts=allowed_hosts,
         allow_pii=(_clean(env.get("PATREON_ALLOW_PII")) or "").lower()
         in {"1", "true", "yes", "on"},

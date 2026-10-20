@@ -10,6 +10,8 @@ class BearerAuthMiddleware:
     """ASGI middleware that requires a fixed bearer token for HTTP requests."""
 
     def __init__(self, app: Any, token: str) -> None:
+        if len(token) < 16:
+            raise ValueError("HTTP bearer token must be at least 16 characters.")
         self.app = app
         self._expected = b"Bearer " + token.encode("utf-8")
 

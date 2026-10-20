@@ -188,6 +188,17 @@ unauthenticated. It binds to loopback by default; binding elsewhere requires
 `--allow-remote-http` and should only be done behind an authenticated reverse
 proxy.
 
+```json
+{
+  "mcpServers": {
+    "patreon-http": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer your-http-token" }
+    }
+  }
+}
+```
+
 ## Tools
 
 | Tool | What it does | Scope |

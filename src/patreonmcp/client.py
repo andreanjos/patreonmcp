@@ -292,7 +292,7 @@ class PatreonClient:
 
     def _adopt_token_file(self) -> bool:
         path = self.settings.token_file
-        if path is None:
+        if path is None or not self.settings.adopt_token_file:
             return False
         try:
             stored = _read_token_file(path)
